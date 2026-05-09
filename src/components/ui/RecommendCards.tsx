@@ -7,6 +7,7 @@ import {
   CopyOutlined,
   CheckOutlined,
   AppstoreOutlined,
+  CodeOutlined,
 } from "@ant-design/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
@@ -22,6 +23,7 @@ export function RecommendCards() {
   const [frameworkOpen, setFrameworkOpen] = useState(false);
   const [frameworkCopied, setFrameworkCopied] = useState(false);
   const [workstationOpen, setWorkstationOpen] = useState(false);
+  const [aicoderOpen, setAicoderOpen] = useState(false);
 
   const cardStyle: React.CSSProperties = {
     padding: "12px 16px",
@@ -92,6 +94,26 @@ export function RecommendCards() {
           <br />
           <Text type="secondary" style={{ fontSize: 11 }}>
             42 集视频教程已发布，MCP 接入试用中
+          </Text>
+        </div>
+        <RightOutlined style={{ fontSize: 11, color: "var(--ant-color-text-quaternary)" }} />
+      </div>
+
+      {/* 推荐：智码 AICoder */}
+      <div
+        onClick={() => setAicoderOpen(true)}
+        style={cardStyle}
+        onMouseEnter={(e) => (e.currentTarget.style.borderColor = "var(--ant-color-primary)")}
+        onMouseLeave={(e) => (e.currentTarget.style.borderColor = "var(--ant-color-border)")}
+      >
+        <CodeOutlined style={{ fontSize: 20, color: "var(--ant-color-primary)" }} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <Text strong style={{ fontSize: 13 }}>
+            智码 AICoder
+          </Text>
+          <br />
+          <Text type="secondary" style={{ fontSize: 11 }}>
+            多 AI 编码工具一站式管理 · 移动端实时联动
           </Text>
         </div>
         <RightOutlined style={{ fontSize: 11, color: "var(--ant-color-text-quaternary)" }} />
@@ -357,6 +379,90 @@ export function RecommendCards() {
             }}
           >
             {frameworkCopied ? "已复制!" : "咨询: 770492966"}
+          </Button>
+        </div>
+      </Modal>
+
+      {/* 智码 AICoder 详情弹窗 */}
+      <Modal
+        title={null}
+        open={aicoderOpen}
+        onCancel={() => setAicoderOpen(false)}
+        footer={[
+          <Button key="close" onClick={() => setAicoderOpen(false)}>关闭</Button>,
+          <Button key="site" type="primary" onClick={() => openUrl("https://aicoder.ruoyi.plus/")}>
+            访问官网
+          </Button>,
+        ]}
+        width={520}
+      >
+        <div style={{ textAlign: "center", paddingTop: 8, paddingBottom: 12 }}>
+          <CodeOutlined style={{ fontSize: 36, color: "var(--ant-color-primary)" }} />
+          <Title level={4} style={{ margin: "12px 0 4px" }}>
+            智码 AICoder
+          </Title>
+          <Paragraph type="secondary" style={{ marginBottom: 12 }}>
+            多 AI 编码工具一站式管理 · PC + 移动端联动
+          </Paragraph>
+          <div style={{ display: "flex", justifyContent: "center", gap: 24 }}>
+            {[
+              ["4 in 1", "Claude / Codex / Gemini / OpenCode"],
+              ["PC + 手机", "实时联动 · 远程接管"],
+              ["跨平台", "Win + macOS + Android"],
+            ].map(([num, label]) => (
+              <div key={label} style={{ textAlign: "center" }}>
+                <div style={{ fontSize: 18, fontWeight: 700, color: "var(--ant-color-primary)" }}>
+                  {num}
+                </div>
+                <Text type="secondary" style={{ fontSize: 11 }}>
+                  {label}
+                </Text>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, justifyContent: "center", marginBottom: 8 }}>
+            <Tag color="orange">Tauri 2.x</Tag>
+            <Tag color="blue">Claude Code</Tag>
+            <Tag color="green">Codex</Tag>
+            <Tag color="cyan">Gemini</Tag>
+            <Tag color="purple">OpenCode</Tag>
+          </div>
+
+          {[
+            ["多工具统一入口", "Claude / Codex / Gemini / OpenCode 一个面板切换，配置 / 会话 / 历史互不打架"],
+            ["原生终端体验", "PTY 真终端 + XTerm.js 渲染，工具调用卡片、Markdown 高亮、变更追踪一应俱全"],
+            ["移动端实时联动", "手机扫码配对桌面端，远程查看会话 / 发送消息 / 上传图片，AI 回复完成实时通知"],
+            ["会话归档与搜索", "本地 SQLite 存所有会话，全文搜索 + 一键导出 Markdown / HTML / JSON"],
+          ].map(([title, desc]) => (
+            <div
+              key={title}
+              style={{
+                padding: "8px 12px",
+                borderRadius: 6,
+                background: "var(--ant-color-bg-layout)",
+                border: "1px solid var(--ant-color-border)",
+              }}
+            >
+              <Text strong style={{ fontSize: 13 }}>
+                {title}
+              </Text>
+              <br />
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {desc}
+              </Text>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ marginTop: 16, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+          <Button type="link" size="small" onClick={() => openUrl("https://aicoder.ruoyi.plus/")}>
+            官网
+          </Button>
+          <Button type="link" size="small" onClick={() => openUrl("https://aicoder.ruoyi.plus/download.html")}>
+            下载
           </Button>
         </div>
       </Modal>

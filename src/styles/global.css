@@ -92,6 +92,26 @@
 :root {
   --sidebar-width: 220px;
   --header-height: 48px;
+
+  /* 界面缩放因子：由 store/applyUiScale 在运行时覆盖（0.75 ~ 2.0），
+     默认 1.0 保持与历史像素值一致。下方所有 --kb-* token 都基于这个因子计算。
+     AntD 组件由 ConfigProvider 直接缩放（见 src/App.tsx），自定义 CSS 走这套 token。 */
+  --ui-scale: 1;
+
+  /* 字号 token —— 编辑器以外的自定义文本元素统一走这里，避免硬编码 px 不随缩放。
+     fallback `var(--ui-scale, 1)` 是双保险：万一 :root 未声明也不会让 calc 失效。 */
+  --kb-font-xs: calc(11px * var(--ui-scale, 1));
+  --kb-font-sm: calc(12px * var(--ui-scale, 1));
+  --kb-font-base: calc(13px * var(--ui-scale, 1));
+  --kb-font-lg: calc(15px * var(--ui-scale, 1));
+  --kb-font-xl: calc(18px * var(--ui-scale, 1));
+  --kb-font-title: calc(28px * var(--ui-scale, 1));
+
+  /* 间距 token —— 自定义组件 padding/margin/gap 用，AntD 内置的 padding 已由 token 覆盖 */
+  --kb-space-xs: calc(4px * var(--ui-scale, 1));
+  --kb-space-sm: calc(6px * var(--ui-scale, 1));
+  --kb-space-md: calc(8px * var(--ui-scale, 1));
+  --kb-space-lg: calc(12px * var(--ui-scale, 1));
 }
 
 html,
@@ -301,6 +321,25 @@ body,
   min-height: 100%;
 }
 
+/* 大屏阅读宽度限制：避免在 2.5K / 4K logical 宽屏上正文行过长难以扫读。
+   - 1800px+: 1280 阅读宽度（≈80 字符/行）
+   - 2200px+: 1400 上限（更舒展，仍优于满屏铺开）
+   大纲打开时，编辑器主体在 grid 1fr 槽内继续居中，大纲仍贴右侧；
+   两侧空白带是预期效果，不是 bug。
+   工具栏的 negative margin -48px 仍能正确撑到 content-area 边缘。 */
+@media (min-width: 1800px) {
+  .editor-content-area {
+    max-width: 1280px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+}
+@media (min-width: 2200px) {
+  .editor-content-area {
+    max-width: 1400px;
+  }
+}
+
 /* Mermaid 预览块：右上角"全屏"按钮，hover preview 时显形 */
 .mermaid-preview .mermaid-preview__fullscreen-btn {
   position: absolute;
@@ -343,8 +382,8 @@ body,
   display: block;
 }
 .tiptap-figure figcaption {
-  margin-top: 6px;
-  font-size: 13px;
+  margin-top: var(--kb-space-sm);
+  font-size: var(--kb-font-base);
   color: var(--ant-color-text-tertiary, #8c8c8c);
   text-align: center;
   font-style: italic;
@@ -376,7 +415,7 @@ body,
 }
 
 .editor-outline {
-  font-size: 13px;
+  font-size: var(--kb-font-base);
   line-height: 1.55;
   color: var(--ant-color-text-secondary, #555);
   border-left: 1px solid var(--ant-color-border-secondary, #f0f0f0);
@@ -385,15 +424,15 @@ body,
 .editor-outline__header {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 12px;
+  gap: var(--kb-space-sm);
+  font-size: var(--kb-font-sm);
   font-weight: 600;
-  margin-bottom: 6px;
+  margin-bottom: var(--kb-space-sm);
   user-select: none;
 }
 .editor-outline__hint {
-  font-size: 11px;
-  margin-top: 4px;
+  font-size: var(--kb-font-xs);
+  margin-top: var(--kb-space-xs);
   line-height: 1.5;
 }
 .editor-outline__list {
@@ -449,9 +488,9 @@ body,
 }
 
 .editor-title .ant-input {
-  font-size: 28px !important;
+  font-size: var(--kb-font-title) !important;
   font-weight: 700 !important;
-  padding: 12px 0 !important;
+  padding: var(--kb-space-lg) 0 !important;
   line-height: 1.4 !important;
 }
 

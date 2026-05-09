@@ -25,6 +25,7 @@ import {
   FolderOpen,
   FileText,
   ChevronsDownUp,
+  Folder as FolderIcon,
   LayoutTemplate,
   ExternalLink,
   Copy,
@@ -116,24 +117,28 @@ function foldersToTreeData(
   creatingUnderKey: string | null,
   notesByFolder: Map<number, Note[]>,
   tabTitleByNoteId: Map<number, string>,
+  showOnlyFolders: boolean,
   depth: number = 0,
 ): EnrichedNode[] {
   return folders.map((f) => {
     const subFolders: EnrichedNode[] = f.children.length
-      ? foldersToTreeData(f.children, creatingUnderKey, notesByFolder, tabTitleByNoteId, depth + 1)
+      ? foldersToTreeData(f.children, creatingUnderKey, notesByFolder, tabTitleByNoteId, showOnlyFolders, depth + 1)
       : [];
 
-    const noteLeaves: EnrichedNode[] = (notesByFolder.get(f.id) ?? [])
-      .slice(0, NOTES_PER_FOLDER_LIMIT)
-      .map((n) => ({
-        key: noteKey(n.id),
-        // 当该笔记 tab 已打开时，优先用 tabs store 的实时 title（编辑器
-        // handleTitleChange 同步进去）→ 用户在编辑器键入即可看到侧边栏跟随。
-        // 没打开 tab 时回退到 DB 拉的 n.title。
-        title: tabTitleByNoteId.get(n.id) || n.title || "未命名",
-        isLeaf: true,
-        data: { isNote: true, note: n },
-      }));
+    // showOnlyFolders 开启时彻底跳过笔记叶节点，只保留子文件夹层级
+    const noteLeaves: EnrichedNode[] = showOnlyFolders
+      ? []
+      : (notesByFolder.get(f.id) ?? [])
+          .slice(0, NOTES_PER_FOLDER_LIMIT)
+          .map((n) => ({
+            key: noteKey(n.id),
+            // 当该笔记 tab 已打开时，优先用 tabs store 的实时 title（编辑器
+            // handleTitleChange 同步进去）→ 用户在编辑器键入即可看到侧边栏跟随。
+            // 没打开 tab 时回退到 DB 拉的 n.title。
+            title: tabTitleByNoteId.get(n.id) || n.title || "未命名",
+            isLeaf: true,
+            data: { isNote: true, note: n },
+          }));
 
     const children: EnrichedNode[] = [...subFolders, ...noteLeaves];
 
@@ -271,6 +276,8 @@ export function NotesPanel() {
   // 展开/收起态走 store 持久化（跨视图保留），笔记列表本地缓存（首次展开后秒开）。
   const uncategorizedExpanded = useAppStore((s) => s.notesUncategorizedExpanded);
   const setUncategorizedExpanded = useAppStore((s) => s.setNotesUncategorizedExpanded);
+  const showOnlyFolders = useAppStore((s) => s.notesShowOnlyFolders);
+  const setShowOnlyFolders = useAppStore((s) => s.setNotesShowOnlyFolders);
   const [uncategorizedNotes, setUncategorizedNotes] = useState<Note[]>([]);
   const loadingUncategorizedRef = useRef(false);
 
@@ -423,6 +430,12 @@ export function NotesPanel() {
 
     // ① 立即高亮（不等异步）—— 用户视觉立刻有反馈
     setSelectedKey(noteKey(noteIdFromUrl));
+
+    // 路由进入具体笔记 → 自动关闭"只显示文件夹"，否则目标笔记被隐藏，
+    // 与"自动展开祖先文件夹"是同一意图：让用户能立刻看到目标。
+    if (useAppStore.getState().notesShowOnlyFolders) {
+      useAppStore.getState().setNotesShowOnlyFolders(false);
+    }
 
     // ② 异步：查 folder_id 并展开到对应位置
     let cancelled = false;
@@ -1579,31 +1592,35 @@ export function NotesPanel() {
       creatingUnderKey,
       notesByFolder,
       tabTitleByNoteId,
+      showOnlyFolders,
     );
-    // 末尾追加"未分类"虚拟根节点：folder_id IS NULL 的笔记直接挂在这里。
-    // 这样未分类笔记也能参与 antd Tree 的拖拽（拖到任意文件夹会触发 handleDrop
-    // 跨 folder 移动逻辑），不需要单独写一套 HTML5 drag 系统。
-    const uncatTitle =
-      uncategorizedNotes.length > 0
-        ? `未分类 ${uncategorizedNotes.length}`
-        : "未分类";
-    const uncatChildren: EnrichedNode[] = uncategorizedNotes
-      .slice(0, NOTES_PER_FOLDER_LIMIT)
-      .map((n) => ({
-        key: noteKey(n.id),
-        title: tabTitleByNoteId.get(n.id) || n.title || "未命名",
-        isLeaf: true,
-        data: { isNote: true, note: n },
-      }));
-    folderTree.push({
-      key: UNCATEGORIZED_KEY,
-      title: uncatTitle,
-      isLeaf: false,
-      children: uncatChildren.length ? uncatChildren : undefined,
-      data: { isNote: false, isChild: false, color: null },
-    });
+    // showOnlyFolders 开启时不挂"未分类"——它本质只装笔记，留着是空壳，会让纯文件夹视图变脏
+    if (!showOnlyFolders) {
+      // 末尾追加"未分类"虚拟根节点：folder_id IS NULL 的笔记直接挂在这里。
+      // 这样未分类笔记也能参与 antd Tree 的拖拽（拖到任意文件夹会触发 handleDrop
+      // 跨 folder 移动逻辑），不需要单独写一套 HTML5 drag 系统。
+      const uncatTitle =
+        uncategorizedNotes.length > 0
+          ? `未分类 ${uncategorizedNotes.length}`
+          : "未分类";
+      const uncatChildren: EnrichedNode[] = uncategorizedNotes
+        .slice(0, NOTES_PER_FOLDER_LIMIT)
+        .map((n) => ({
+          key: noteKey(n.id),
+          title: tabTitleByNoteId.get(n.id) || n.title || "未命名",
+          isLeaf: true,
+          data: { isNote: true, note: n },
+        }));
+      folderTree.push({
+        key: UNCATEGORIZED_KEY,
+        title: uncatTitle,
+        isLeaf: false,
+        children: uncatChildren.length ? uncatChildren : undefined,
+        data: { isNote: false, isChild: false, color: null },
+      });
+    }
     return folderTree;
-  }, [folders, creatingUnderKey, notesByFolder, tabTitleByNoteId, uncategorizedNotes]);
+  }, [folders, creatingUnderKey, notesByFolder, tabTitleByNoteId, uncategorizedNotes, showOnlyFolders]);
 
   return (
     <div
@@ -1626,11 +1643,33 @@ export function NotesPanel() {
         <Button
           type="text"
           size="small"
+          icon={<FolderIcon size={14} />}
+          onClick={() => setShowOnlyFolders(!showOnlyFolders)}
+          style={{
+            width: 24,
+            height: 24,
+            padding: 0,
+            // 激活态用主题色高亮：图标 + 浅底色，与折叠按钮形成视觉区分
+            color: showOnlyFolders ? token.colorPrimary : undefined,
+            background: showOnlyFolders ? token.colorPrimaryBg : undefined,
+          }}
+          title={showOnlyFolders ? "显示全部（含笔记）" : "只显示文件夹"}
+        />
+        <Button
+          type="text"
+          size="small"
           icon={<ChevronsDownUp size={14} />}
           onClick={() => {
-            // 折叠/展开全部文件夹（state 走 store，自动 persist）
+            // 折叠/展开全部文件夹（state 走 store，自动 persist）。
+            // 注意：判定基于"文件夹本身"是否全部折叠——expandedKeys 里
+            // 包含 UNCATEGORIZED_KEY（虚拟节点），如果一并算进去，用户
+            // 展开过未分类后这个按钮就永远走折叠分支，无法展开。
             const store = useAppStore.getState();
-            if (expandedKeys.length === 0) {
+            const collapsedSet = new Set(collapsedFolderKeys);
+            const allFolded =
+              allFolderKeys.length > 0 &&
+              allFolderKeys.every((k) => collapsedSet.has(k));
+            if (allFolded) {
               store.clearNotesCollapsedFolders();
             } else {
               store.setNotesAllFoldersCollapsed(allFolderKeys);
