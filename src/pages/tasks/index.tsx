@@ -127,12 +127,18 @@ function describeRepeat(task: Task): string {
   return iv === 1 ? "每周" : `每${iv}周`;
 }
 
-function describeDueDate(due: string | null): { text: string; overdue: boolean } {
+function describeDueDate(
+  due: string | null,
+  done = false,
+): { text: string; overdue: boolean } {
   if (!due) return { text: "", overdue: false };
+  // 已完成任务：不再算"逾期"，徽章退化为中性日期 tag。
+  // Why: "逾期"是给未完成任务的醒目提醒，完成后这个语义已消失，
+  //      继续红色标红只是噪音。保留日期文本但 overdue=false 让调用方走灰色样式。
   const today = ymdLocal(new Date());
   const dueDay = dueDateOnly(due);
-  // 带时分时把时分单独展示在末尾
   const timeSuffix = due.length > 10 ? ` ${due.slice(11, 16)}` : "";
+  if (done) return { text: `${dueDay}${timeSuffix}`, overdue: false };
   if (dueDay === today) return { text: `今天${timeSuffix}`, overdue: false };
   if (dueDay < today) {
     const diff = Math.floor(
@@ -1172,7 +1178,7 @@ function TaskRow({
   onSubtaskChanged,
 }: RowProps) {
   const done = task.status === 1;
-  const due = describeDueDate(task.due_date);
+  const due = describeDueDate(task.due_date, done);
   const isSelected = !!selected;
   const hasSubtasks = task.subtask_total > 0;
   return (

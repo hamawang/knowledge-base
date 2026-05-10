@@ -200,7 +200,12 @@ export function ActivityBar() {
           offset={[2, -2]}
           overflowCount={99}
         >
-          {item.icon}
+          {/* color: inherit 桥接：antd Badge wrapper 默认 color 会截断
+              button → svg currentColor 继承链，导致 isActive 切换时
+              图标 stroke 不变（其他 tab 正常）。 */}
+          <span style={{ color: "inherit", display: "inline-flex" }}>
+            {item.icon}
+          </span>
         </Badge>
       ) : (
         item.icon
