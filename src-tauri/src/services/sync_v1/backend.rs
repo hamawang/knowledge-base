@@ -126,7 +126,7 @@ pub trait SyncBackendImpl {
     /// T-S025：列出远端 `attachments/` 目录下所有附件文件名（即 hash）
     ///
     /// 用于 GC：远端有但 manifest 没引用的 hash = 孤儿。
-    /// 默认实现返回空（backend 不支持递归列举时不报错，只是不能 GC，如 WebDAV）。
+    /// Local / S3 / WebDAV 均已实现；默认实现返回空（不支持递归列举的 backend 不报错，只是 GC no-op）。
     ///
     /// 实现约定：必须过滤掉以 `_` 开头的特殊文件（如 `_gc_marks.json`）。
     fn list_attachment_hashes(&self) -> Result<Vec<String>, AppError> {

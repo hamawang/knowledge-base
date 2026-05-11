@@ -197,14 +197,25 @@ export function SyncV1Section() {
     try {
       let deleted = 0;
       let marked = 0;
+      let unmarked = 0;
+      const errors: string[] = [];
       for (const b of backends) {
         const r = await syncV1Api.gcAttachments(b.id);
         deleted += r.deleted;
         marked += r.newlyMarked;
+        unmarked += r.unmarked;
+        if (r.errors?.length) errors.push(...r.errors);
       }
-      message.success(
-        `孤儿附件清理完成：删除 ${deleted} 个，新标记 ${marked} 个（满 7 天后下次清理时删除）`,
-      );
+      const parts = [`删除 ${deleted} 个`, `新标记 ${marked} 个`];
+      if (unmarked > 0) parts.push(`恢复 ${unmarked} 个（又被引用）`);
+      const summary = parts.join("，");
+      if (errors.length > 0) {
+        message.warning(
+          `孤儿附件清理完成（${errors.length} 个出错）：${summary}。首例：${errors[0]}`,
+        );
+      } else {
+        message.success(`孤儿附件清理完成：${summary}（新标记的满 7 天后下次清理时删除）`);
+      }
     } catch (e) {
       message.error(`清理孤儿附件失败：${e}`);
     } finally {
@@ -484,7 +495,7 @@ export function SyncV1Section() {
               重建附件索引
             </Button>
           </Tooltip>
-          <Tooltip title="清理远端 attachments/ 下已无笔记引用的孤儿文件。首次发现的孤儿会先标记，满 7 天再删（防误删）。仅本地路径 / S3 同步源支持。">
+          <Tooltip title="清理远端 attachments/ 下已无笔记引用的孤儿文件。首次发现的孤儿会先标记，满 7 天再删（防误删）。本地路径 / S3 / WebDAV 均支持（个别禁用递归列举的 WebDAV 服务器会自动跳过）。">
             <Button
               size="small"
               loading={gcRunning}
