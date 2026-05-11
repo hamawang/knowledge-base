@@ -38,6 +38,7 @@ pub fn pull<R: Runtime, E: Emitter<R>>(
     app_version: &str,
     device: &str,
     conflicts_dir: &Path,
+    data_dir: &Path,
     emitter: &E,
 ) -> Result<SyncPullResult, AppError> {
     let mut result = SyncPullResult::default();
@@ -130,6 +131,80 @@ pub fn pull<R: Runtime, E: Emitter<R>>(
         },
     );
     let diff = manifest::diff_manifests(&local, &remote);
+
+    // ── T-S024：附件下载阶段（先于笔记 entry pull，让笔记内容拉下来时附件已就位）
+    //
+    // 流程：
+    //   远端 manifest.attachments - 本地 unique hashes → 差集要下载
+    //   下载内容写到 {prefix}kb_assets/sync_in/<hash>.<ext>（dev/prod 目录前缀对齐）
+    //
+    // 路径还原说明：pull 端的笔记 .md 里可能引用 `kb_assets/images/xxx.png` 等原始路径，
+    // 但拉到的实际文件落在 sync_in/ → 编辑器/渲染器需要做 hash 反查 fallback。
+    // 这是后续 UI 任务（不在 T-S024 范围），现阶段保证字节到达本地即可。
+    let local_hashes: std::collections::HashSet<String> = db
+        .list_all_unique_attachments()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| r.sha256_hex)
+        .collect();
+    let to_download: Vec<&crate::models::AttachmentEntry> = remote
+        .attachments
+        .iter()
+        .filter(|a| !local_hashes.contains(&a.hash))
+        .collect();
+    let total_dl = to_download.len();
+    if total_dl > 0 {
+        let assets_prefix = if cfg!(debug_assertions) {
+            "dev-kb_assets"
+        } else {
+            "kb_assets"
+        };
+        let sync_in_dir = data_dir.join(assets_prefix).join("sync_in");
+        if let Err(e) = std::fs::create_dir_all(&sync_in_dir) {
+            log::warn!("[sync_v1] 创建 sync_in 目录失败 ({}): {}", sync_in_dir.display(), e);
+        }
+
+        for (idx, att) in to_download.iter().enumerate() {
+            let _ = emitter.emit(
+                event_name,
+                ProgressEvent {
+                    backend_id,
+                    phase: "attachments".into(),
+                    current: idx + 1,
+                    total: total_dl,
+                    message: format!(
+                        "下载附件 {} ({} bytes)",
+                        &att.hash[..att.hash.len().min(8)],
+                        att.size
+                    ),
+                },
+            );
+
+            match backend.get_attachment(&att.hash) {
+                Ok(Some(bytes)) => {
+                    let ext = att.ext.as_deref().unwrap_or("bin");
+                    let target = sync_in_dir.join(format!("{}.{}", att.hash, ext));
+                    match std::fs::write(&target, &bytes) {
+                        Ok(_) => result.attachments_downloaded += 1,
+                        Err(e) => result.errors.push(format!(
+                            "写入附件 {} 失败: {}",
+                            target.display(),
+                            e
+                        )),
+                    }
+                }
+                Ok(None) => result.errors.push(format!(
+                    "远端 manifest 有附件 {} 但 get_attachment 返回空",
+                    &att.hash[..att.hash.len().min(8)]
+                )),
+                Err(e) => result.errors.push(format!(
+                    "下载附件 {} 失败: {}",
+                    &att.hash[..att.hash.len().min(8)],
+                    e
+                )),
+            }
+        }
+    }
 
     // ── 处理 to_pull（远端独有 / 远端较新）
     let total_pull = diff.to_pull.len();

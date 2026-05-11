@@ -111,6 +111,7 @@ pub fn sync_v1_push(
         backend_impl.as_ref(),
         &app_version,
         &device,
+        &state.data_dir,
         &window,
     )
     .map_err(|e| e.to_string())
@@ -149,6 +150,7 @@ pub fn sync_v1_pull(
         &app_version,
         &device,
         &conflicts_dir,
+        &state.data_dir,
         &window,
     )
     .map_err(|e| e.to_string())
@@ -163,6 +165,22 @@ pub fn sync_v1_get_local_manifest(
     let app_version = app.package_info().version.to_string();
     let device = hostname_short();
     crate::services::sync_v1::compute_local_manifest(&state.db, &app_version, &device)
+        .map_err(|e: AppError| e.to_string())
+}
+
+/// T-S024: 重建附件索引
+///
+/// 扫描所有活跃笔记的 content，提取 markdown 图片/链接/wiki 嵌入中的本地资产引用，
+/// 计算 sha256 并 upsert 到 `note_attachments` 表。
+///
+/// 触发场景：
+/// - 用户在设置页点"重建附件索引"按钮（首次启用 V1 同步时建议跑一次）
+/// - 笔记大批量导入后（外部工具导入的笔记 content 已经写好但索引表是空的）
+///
+/// 性能：O(笔记数 × 资产读取 IO)。1 万条笔记约几秒（取决于附件数和磁盘速度）。
+#[tauri::command]
+pub fn sync_v1_rebuild_attachment_index(state: State<'_, AppState>) -> Result<usize, String> {
+    crate::services::sync_v1::attachment_scan::scan_all_active_notes(&state.db, &state.data_dir)
         .map_err(|e: AppError| e.to_string())
 }
 

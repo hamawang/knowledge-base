@@ -161,6 +161,7 @@ fn run_pull_blocking(app: &AppHandle, backend_id: i64) -> Result<String, String>
         &app_version,
         &device,
         &conflicts_dir,
+        &state.data_dir,
         app, // AppHandle 自身实现 Emitter
     )
     .map_err(|e| e.to_string())?;
@@ -191,6 +192,7 @@ fn run_push_blocking(app: &AppHandle, backend_id: i64) -> Result<String, String>
         backend_impl.as_ref(),
         &app_version,
         &device,
+        &state.data_dir,
         app,
     )
     .map_err(|e| e.to_string())?;

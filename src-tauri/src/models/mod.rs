@@ -1380,6 +1380,10 @@ pub struct SyncPushResult {
     pub deleted_remote: usize,
     /// 跳过（无变更）数
     pub skipped: usize,
+    /// T-S024: 上传的附件数（远端原先没有，本机新传）
+    pub attachments_uploaded: usize,
+    /// T-S024: 跳过的附件数（has_attachment=true，远端已存在）
+    pub attachments_skipped: usize,
     /// 错误清单
     pub errors: Vec<String>,
 }
@@ -1394,6 +1398,8 @@ pub struct SyncPullResult {
     pub deleted_local: usize,
     /// 冲突数（远端有变更 + 本地也有变更 → 走 last-write-wins，落败方进 .conflicts/）
     pub conflicts: usize,
+    /// T-S024: 下载的附件数（远端 manifest 列了但本机没有的）
+    pub attachments_downloaded: usize,
     /// 错误清单
     pub errors: Vec<String>,
 }

@@ -15,6 +15,9 @@ use super::Database;
 /// 一条 note_attachments 行
 #[derive(Debug, Clone)]
 pub struct NoteAttachmentRow {
+    /// note_id 当前主要给 list_attachments_for_note 返回 + CASCADE 测试用；
+    /// list_all_unique_attachments 调 GROUP BY 后 note_id 只是任取一条的代表值
+    #[allow(dead_code)]
     pub note_id: i64,
     pub local_rel_path: String,
     pub sha256_hex: String,
@@ -49,6 +52,9 @@ impl Database {
     }
 
     /// 列出某笔记的所有附件引用
+    ///
+    /// 预留给 UI 显示"此笔记引用的附件清单"+ note CASCADE 测试用。
+    #[allow(dead_code)]
     pub fn list_attachments_for_note(
         &self,
         note_id: i64,
@@ -108,7 +114,8 @@ impl Database {
     /// 按 sha256 反查本地路径（任取一条）
     ///
     /// 同 hash 多 path 时返回第一条 — pull 端写入 `sync_in/<hash>.<ext>` 不依赖此查找；
-    /// 此方法主要给"本地命中跳过下载"的场景用。
+    /// 此方法主要给"渲染器按 hash 找原路径文件"的 fallback 场景用（后续 UI 集成时启用）。
+    #[allow(dead_code)]
     pub fn find_attachment_path_by_hash(
         &self,
         sha256_hex: &str,

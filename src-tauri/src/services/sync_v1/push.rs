@@ -34,6 +34,7 @@ pub fn push<R: Runtime, E: Emitter<R>>(
     backend: &dyn SyncBackendImpl,
     app_version: &str,
     device: &str,
+    data_dir: &std::path::Path,
     emitter: &E,
 ) -> Result<SyncPushResult, AppError> {
     let mut result = SyncPushResult::default();
@@ -282,6 +283,66 @@ pub fn push<R: Runtime, E: Emitter<R>>(
         }
     }
 
+    // T-S024：附件上传（CAS 去重）
+    //
+    // 本机所有 unique sha256 → has_attachment 远端 → 缺失的 put_attachment 上传。
+    // 顺序在 manifest 写入之前：保证 manifest 公布的 hash 都已经在远端，
+    // 避免拉端拿到 manifest 后 get_attachment 失败。
+    let local_attachments = db.list_all_unique_attachments().unwrap_or_default();
+    let total_attach = local_attachments.len();
+    for (idx, att) in local_attachments.iter().enumerate() {
+        let _ = emitter.emit(
+            event_name,
+            ProgressEvent {
+                backend_id,
+                phase: "attachments".into(),
+                current: idx + 1,
+                total: total_attach,
+                message: format!("附件 {} ({} bytes)", short_hash(&att.sha256_hex), att.size),
+            },
+        );
+
+        // has 判定：远端已有 → 跳过；失败 → 记错继续
+        match backend.has_attachment(&att.sha256_hex) {
+            Ok(true) => {
+                result.attachments_skipped += 1;
+                continue;
+            }
+            Ok(false) => {}
+            Err(e) => {
+                result.errors.push(format!(
+                    "has_attachment 检查失败 {}: {}",
+                    short_hash(&att.sha256_hex),
+                    e
+                ));
+                continue;
+            }
+        }
+
+        // 读本地文件
+        let abs = data_dir.join(&att.local_rel_path);
+        let bytes = match std::fs::read(&abs) {
+            Ok(b) => b,
+            Err(e) => {
+                result.errors.push(format!(
+                    "读取本地附件 {} 失败: {}",
+                    att.local_rel_path, e
+                ));
+                continue;
+            }
+        };
+
+        // 上传
+        match backend.put_attachment(&att.sha256_hex, &bytes) {
+            Ok(_) => result.attachments_uploaded += 1,
+            Err(e) => result.errors.push(format!(
+                "上传附件 {} 失败: {}",
+                short_hash(&att.sha256_hex),
+                e
+            )),
+        }
+    }
+
     // 写新的远端 manifest = merge(local, remote_独有)
     //
     // T-S013：以前的版本直接 `write_manifest(&local)` 会**吞掉远端独有项** ——
@@ -346,6 +407,15 @@ pub fn push<R: Runtime, E: Emitter<R>>(
 
     let _ = (diff, &result); // 防止 lint：diff 当前仅用于循环
     Ok(result)
+}
+
+/// 截断 hash 用于日志/事件消息（前 8 位足以辨识）
+fn short_hash(hash: &str) -> String {
+    if hash.len() >= 8 {
+        hash[..8].to_string()
+    } else {
+        hash.to_string()
+    }
 }
 
 /// 把笔记渲染成 markdown 文本（只是给 .md 文件用）

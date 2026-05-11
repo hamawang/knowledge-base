@@ -318,12 +318,25 @@
 
 #### T-S024 · push/pull 集成附件同步
 
-- **状态**：`pending`
+- **状态**：`completed` · 完成日期：2026-05-11
 - **价值**：⭐⭐⭐⭐⭐  成本：中（0.5 天）
 - **依赖**：T-S022 + T-S023
 - **子任务**：
-  - [ ] push：本地 unique hashes - has_attachment 远端 → 上传缺失的
-  - [ ] pull：远端 manifest.attachments - 本地 unique hashes → 下载缺失的到 sync_in/
+  - [x] `push.rs` 加 `data_dir` 参数 + attachments phase（在 write_manifest 之前）：
+    - `list_all_unique_attachments` → `has_attachment` 远端 → 缺失的 `put_attachment`
+    - 上传失败记 errors 继续，不阻塞 manifest 写入
+  - [x] `pull.rs` 加 `data_dir` 参数 + attachments phase（在笔记 entry pull 之前）：
+    - 远端 manifest.attachments - 本地 unique hashes → 下载差集
+    - 写到 `{prefix}kb_assets/sync_in/<hash>.<ext>`（dev/prod 前缀对齐）
+  - [x] `models::SyncPushResult` 加 `attachments_uploaded` + `attachments_skipped`
+  - [x] `models::SyncPullResult` 加 `attachments_downloaded`
+  - [x] caller 修复：`commands/sync_v1.rs` + `services/sync_v1_scheduler.rs` 各 2 处传 `&state.data_dir`
+  - [x] 新 Command `sync_v1_rebuild_attachment_index`：手动扫描全库笔记建索引（设置页"重建附件索引"按钮用）
+  - [x] 注册 Command 到 `lib.rs::generate_handler!`
+  - [x] 全 lib 191 个单测无回归（编译零警告）
+- **后续 UI 集成（不在本任务范围）**：
+  - 笔记编辑器/渲染器按 hash 反查 `find_attachment_path_by_hash`，sync_in/<hash>.<ext> 作为 fallback
+  - 设置页加"重建附件索引"按钮调用新 Command
 
 #### T-S025 · 孤儿附件 GC（可选）
 
@@ -437,6 +450,9 @@ Phase X (按需)        ──────► 端到端加密 / 冲突合并 UI
 - **Phase 2**：✅ 完成（T-S010 / T-S011 / T-S012 / T-S013 / T-S014）—— 2026-05-11
   - 收益：多端 stable_uuid 不撞车；tombstone 推送解决删除复活；manifest 合并不再吞远端；
     端到端加密笔记跨端同步（方案 B：共享 salt + 密文 base64 上传）
-- **Phase 3-5 / X**：⏸ 排队中（CAS 附件、并发上传、V0 退化）
+- **Phase 3**：✅ 核心闭环完成（T-S020~T-S024）—— 2026-05-11
+  - 收益：sidecar CAS 附件同步落地，push 按 hash 去重上传，pull 写入 sync_in/，
+    新 Command 重建附件索引；T-S025 GC 列为可选项延后
+- **Phase 4-5**：⏸ 排队中（并发上传、V0 退化为"快照归档"）
 
-下次开始任务时，从 **Phase 3 / T-S020 (CAS 目录结构设计)** 开始：先评估 + 给方案 + 等确认。
+下次开始任务时，从 **Phase 4 / T-S030 (batch_put_notes trait)** 开始：先评估 + 给方案 + 等确认。
