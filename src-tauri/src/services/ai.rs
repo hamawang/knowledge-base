@@ -1411,6 +1411,25 @@ impl AiService {
             model_id
         };
         let model = db.get_ai_model(conv_model_id)?;
+
+        // 1.5 Ollama 不走工具调用路径，改走原始 RAG（chat_stream）。
+        //
+        // 原因：智能模式会把几十个工具 schema（5 内置 + 所有 enabled MCP 工具）塞进 /api/chat
+        // 请求，Ollama 上的本地小模型（如 qwen2.5:7b）光是 prompt-eval 这一大段就可能要好几分钟
+        // （冷启动 + CPU 推理 + 远程网络），期间一个 token 都不吐 —— 用户体验等同卡死；而且小模型
+        // 的 function-calling 本来就不可靠。所以 Ollama 一律退回到最初的"文档查询"实现：
+        // chat_stream 会先用关键词检索相关笔记、把内容塞进 system prompt（RAG），再普通流式问模型，
+        // 不发任何工具。文档查询照样能用，且快。
+        //
+        // （早返回，在保存用户消息 / 构建工具消息之前 —— chat_stream 内部会自己保存用户消息。）
+        if model.provider == "ollama" {
+            log::info!(
+                "[skills] provider=ollama (model={}) → 不发工具，改走 RAG 路径 chat_stream",
+                model.model_id
+            );
+            return Self::chat_stream(app, db, conversation_id, user_message, true, cancel_rx).await;
+        }
+        // 走到这里一定不是 ollama（上面已早返回）；保留这个变量给下方按 provider 分流用
         let is_ollama = model.provider == "ollama";
 
         // 2. 保存用户消息
