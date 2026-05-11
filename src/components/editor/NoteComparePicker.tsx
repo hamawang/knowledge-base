@@ -9,6 +9,7 @@ import { App as AntdApp, Modal, Select } from "antd";
 import { noteApi } from "@/lib/api";
 import type { Note } from "@/types";
 import { DiffMergeModal, type DiffSide } from "./DiffMergeModal";
+import { tidyNoteMarkdown } from "./markdownDiffUtil";
 
 interface Props {
   /** 第一篇笔记 id（来自列表右键）；为 null 时本组件不渲染任何东西 */
@@ -28,6 +29,8 @@ export function NoteComparePicker({ firstNoteId, onClose }: Props) {
   const [right, setRight] = useState<DiffSide>({ label: "", value: "", editable: true });
   const noteARef = useRef<Note | null>(null);
   const noteBRef = useRef<Note | null>(null);
+  const baseARef = useRef<string>("");
+  const baseBRef = useRef<string>("");
 
   // firstNoteId 变化 → 拉第一篇 + 打开选择器
   useEffect(() => {
@@ -83,8 +86,12 @@ export function NoteComparePicker({ firstNoteId, onClose }: Props) {
         return;
       }
       noteBRef.current = b;
-      setLeft({ label: a.title || `笔记 #${a.id}`, value: a.content, editable: true });
-      setRight({ label: b.title || `笔记 #${b.id}`, value: b.content, editable: true });
+      const aMd = tidyNoteMarkdown(a.content);
+      const bMd = tidyNoteMarkdown(b.content);
+      baseARef.current = aMd;
+      baseBRef.current = bMd;
+      setLeft({ label: a.title || `笔记 #${a.id}`, value: aMd, editable: true });
+      setRight({ label: b.title || `笔记 #${b.id}`, value: bMd, editable: true });
       setPickerOpen(false);
       setMergeOpen(true);
     } catch (e) {
@@ -96,11 +103,11 @@ export function NoteComparePicker({ firstNoteId, onClose }: Props) {
     const a = noteARef.current;
     const b = noteBRef.current;
     let touched = false;
-    if (a && editedA !== a.content) {
+    if (a && editedA !== baseARef.current) {
       await noteApi.update(a.id, { title: a.title, content: editedA, folder_id: a.folder_id ?? null });
       touched = true;
     }
-    if (b && editedB !== b.content) {
+    if (b && editedB !== baseBRef.current) {
       await noteApi.update(b.id, { title: b.title, content: editedB, folder_id: b.folder_id ?? null });
       touched = true;
     }

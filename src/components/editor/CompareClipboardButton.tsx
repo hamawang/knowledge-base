@@ -7,27 +7,24 @@
  * 纯前端：剪贴板走 `@tauri-apps/plugin-clipboard-manager`（权限 `clipboard-manager:allow-read-text` 已声明），
  * 笔记 markdown 走 tiptap-markdown 注入的 `editor.storage.markdown`。
  */
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Button, Tooltip, message } from "antd";
 import { Diff } from "lucide-react";
 import type { Editor } from "@tiptap/react";
 import { readText } from "@tauri-apps/plugin-clipboard-manager";
 import { DiffMergeModal, type DiffSide } from "./DiffMergeModal";
+import { getNoteMarkdown } from "./markdownDiffUtil";
 
 interface Props {
   editor: Editor;
-}
-
-/** tiptap-markdown 注入的 storage.markdown（无 TS 声明） */
-function getEditorMarkdown(editor: Editor): string {
-  const storage = editor.storage as { markdown?: { getMarkdown: () => string } };
-  return storage.markdown?.getMarkdown() ?? editor.getText({ blockSeparator: "\n\n" });
 }
 
 export function CompareClipboardButton({ editor }: Props) {
   const [open, setOpen] = useState(false);
   const [left, setLeft] = useState<DiffSide>({ label: "剪贴板", value: "", editable: false });
   const [right, setRight] = useState<DiffSide>({ label: "当前笔记 (markdown)", value: "", editable: true });
+  // 打开时的笔记 markdown 基线：保存时只有真改了才写回
+  const baseRightRef = useRef<string>("");
 
   async function handleOpen() {
     let clip = "";
@@ -36,8 +33,10 @@ export function CompareClipboardButton({ editor }: Props) {
     } catch {
       clip = "";
     }
+    const curMd = getNoteMarkdown(editor);
+    baseRightRef.current = curMd;
     setLeft({ label: "剪贴板", value: clip, editable: false });
-    setRight({ label: "当前笔记 (markdown)", value: getEditorMarkdown(editor), editable: true });
+    setRight({ label: "当前笔记 (markdown)", value: curMd, editable: true });
     setOpen(true);
   }
 
@@ -53,6 +52,10 @@ export function CompareClipboardButton({ editor }: Props) {
         right={right}
         saveHint="保存会用 markdown 重新生成整篇笔记，表格 / 批注 / 嵌入 / 折叠等自定义块可能不完全保留。"
         onSave={({ right: newMd }) => {
+          if (newMd === baseRightRef.current) {
+            message.info("没有更改，未保存");
+            return;
+          }
           // tiptap-markdown 让 setContent 接受 markdown 字符串
           editor.commands.setContent(newMd, { emitUpdate: true });
           message.success("已用合并结果更新笔记内容");
