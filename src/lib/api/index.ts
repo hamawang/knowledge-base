@@ -717,27 +717,31 @@ export const promptApi = {
     invoke<void>("set_prompt_enabled", { id, enabled }),
 };
 
-/** 同步 API（V1 本地 ZIP + V2 WebDAV 全量快照） */
+/** 同步 API（V0 快照归档：本地 ZIP + WebDAV 全量快照） */
 export const syncApi = {
-  /** 导出为本地 ZIP 文件 */
-  exportToFile: (scope: SyncScope, targetPath: string) =>
-    invoke<SyncResult>("sync_export_to_file", { scope, targetPath }),
-  /** 从本地 ZIP 文件导入 */
-  importFromFile: (sourcePath: string, mode: SyncImportMode) =>
-    invoke<SyncManifest>("sync_import_from_file", { sourcePath, mode }),
+  /** 导出为本地 ZIP 文件。backupPassword 非空时输出加密包（.zip.enc） */
+  exportToFile: (scope: SyncScope, targetPath: string, backupPassword?: string) =>
+    invoke<SyncResult>("sync_export_to_file", { scope, targetPath, backupPassword }),
+  /** 从本地 ZIP/.enc 文件导入。加密文件需提供 backupPassword */
+  importFromFile: (sourcePath: string, mode: SyncImportMode, backupPassword?: string) =>
+    invoke<SyncManifest>("sync_import_from_file", { sourcePath, mode, backupPassword }),
   /** 测试 WebDAV 连接 */
   webdavTest: (url: string, username: string, password: string) =>
     invoke<void>("sync_webdav_test", { url, username, password }),
-  /** 推送到 WebDAV */
-  webdavPush: (scope: SyncScope, config: WebDavConfig) =>
-    invoke<SyncResult>("sync_webdav_push", { scope, config }),
-  /** 从 WebDAV 拉取 */
-  webdavPull: (mode: SyncImportMode, config: WebDavConfig, filename?: string) =>
-    invoke<SyncManifest>("sync_webdav_pull", { mode, config, filename }),
-  /** 预览云端 manifest */
+  /** 推送到 WebDAV。backupPassword 非空时上传加密包（kb-sync-<host>.zip.enc） */
+  webdavPush: (scope: SyncScope, config: WebDavConfig, backupPassword?: string) =>
+    invoke<SyncResult>("sync_webdav_push", { scope, config, backupPassword }),
+  /** 从 WebDAV 拉取。云端是加密包时需提供 backupPassword */
+  webdavPull: (
+    mode: SyncImportMode,
+    config: WebDavConfig,
+    filename?: string,
+    backupPassword?: string,
+  ) => invoke<SyncManifest>("sync_webdav_pull", { mode, config, filename, backupPassword }),
+  /** 预览云端 manifest（加密包不支持，会返回错误） */
   webdavPreview: (config: WebDavConfig, filename?: string) =>
     invoke<SyncManifest>("sync_webdav_preview", { config, filename }),
-  /** 列出云端所有 kb-sync-*.zip 快照（多设备场景） */
+  /** 列出云端所有 kb-sync-*.zip / .zip.enc 快照（多设备场景） */
   webdavListSnapshots: (config: WebDavConfig) =>
     invoke<RemoteSnapshot[]>("sync_webdav_list_snapshots", { config }),
   /** 保存 WebDAV 密码到 OS keyring */
@@ -752,6 +756,15 @@ export const syncApi = {
   /** 删除 keyring 中的密码 */
   deletePassword: (username: string) =>
     invoke<void>("sync_delete_webdav_password", { username }),
+  /** T-S050: 保存备份密码（全局唯一，hostname 派生 key 加密存 SQLite） */
+  saveBackupPassword: (password: string) =>
+    invoke<void>("sync_save_backup_password", { password }),
+  /** T-S050: 是否已保存备份密码 */
+  hasBackupPassword: () => invoke<boolean>("sync_has_backup_password"),
+  /** T-S050: 取已保存的备份密码明文（前端加载时填回密码框） */
+  getBackupPassword: () => invoke<string | null>("sync_get_backup_password"),
+  /** T-S050: 删除备份密码（关闭加密备份时） */
+  deleteBackupPassword: () => invoke<void>("sync_delete_backup_password"),
   /** 列出同步历史 */
   listHistory: (limit?: number) =>
     invoke<SyncHistoryItem[]>("sync_list_history", { limit }),

@@ -18,6 +18,8 @@ pub fn sync_export_to_file(
     app: tauri::AppHandle,
     scope: SyncScope,
     target_path: String,
+    // T-S050: 端到端加密备份密码（前端从 SyncSection 状态传；None = 明文 ZIP）
+    backup_password: Option<String>,
 ) -> Result<SyncResult, String> {
     let version = app.package_info().version.to_string();
     let history_id = state
@@ -31,6 +33,7 @@ pub fn sync_export_to_file(
         &scope,
         &version,
         &PathBuf::from(&target_path),
+        backup_password.as_deref(),
     );
 
     record_history(&state, history_id, &result);
@@ -43,6 +46,8 @@ pub fn sync_import_from_file(
     app: tauri::AppHandle,
     source_path: String,
     mode: SyncImportMode,
+    // T-S050: 若导入文件是加密快照需提供密码；明文文件传 None
+    backup_password: Option<String>,
 ) -> Result<SyncManifest, String> {
     let db_path = resolve_db_path(&state.data_dir);
     let db_path_str = db_path.to_string_lossy().into_owned();
@@ -60,6 +65,7 @@ pub fn sync_import_from_file(
         &db_path,
         &PathBuf::from(&source_path),
         mode,
+        backup_password.as_deref(),
     );
 
     // 无论 apply 成败，都必须 reopen 回真实 db；否则连接会停在 :memory: 空库，
@@ -101,6 +107,8 @@ pub async fn sync_webdav_push(
     app: tauri::AppHandle,
     scope: SyncScope,
     config: WebDavConfig,
+    // T-S050: 加密备份密码（None = 上传明文 .zip；Some = 上传 .zip.enc）
+    backup_password: Option<String>,
 ) -> Result<SyncResult, String> {
     let version = app.package_info().version.to_string();
     let password = resolve_password(&state.db, &config)?;
@@ -118,6 +126,7 @@ pub async fn sync_webdav_push(
         &config.url,
         &config.username,
         &password,
+        backup_password.as_deref(),
     )
     .await;
 
@@ -132,6 +141,8 @@ pub async fn sync_webdav_pull(
     mode: SyncImportMode,
     config: WebDavConfig,
     filename: Option<String>,
+    // T-S050: 若云端快照已加密需提供密码；未提供且默认拉到加密包 → Err
+    backup_password: Option<String>,
 ) -> Result<SyncManifest, String> {
     let password = resolve_password(&state.db, &config)?;
     let db_path = resolve_db_path(&state.data_dir);
@@ -154,6 +165,7 @@ pub async fn sync_webdav_pull(
         &config.username,
         &password,
         filename.as_deref(),
+        backup_password.as_deref(),
     )
     .await;
 
@@ -256,6 +268,34 @@ pub fn sync_delete_webdav_password(
     username: String,
 ) -> Result<(), String> {
     SyncService::delete_webdav_password(&state.db, &username).map_err(|e| e.to_string())
+}
+
+// ─── T-S050 备份密码（端到端加密快照用，全局唯一一个）─────────────────────
+
+#[tauri::command]
+pub fn sync_save_backup_password(
+    state: State<'_, AppState>,
+    password: String,
+) -> Result<(), String> {
+    SyncService::save_backup_password(&state.db, &password).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn sync_has_backup_password(state: State<'_, AppState>) -> Result<bool, String> {
+    SyncService::get_backup_password(&state.db)
+        .map(|p| p.is_some())
+        .map_err(|e| e.to_string())
+}
+
+/// 取已保存的备份密码明文（前端 SyncSection 加载时填回密码框）
+#[tauri::command]
+pub fn sync_get_backup_password(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    SyncService::get_backup_password(&state.db).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn sync_delete_backup_password(state: State<'_, AppState>) -> Result<(), String> {
+    SyncService::delete_backup_password(&state.db).map_err(|e| e.to_string())
 }
 
 // ─── 同步历史 ─────────────────────────────────

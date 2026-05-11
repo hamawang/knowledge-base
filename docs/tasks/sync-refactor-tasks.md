@@ -421,26 +421,27 @@
 
 #### T-S050 · V0 快照归档 ZIP 端到端加密
 
-- **状态**：`in_progress`（Part 1 ✅ 核心加密层；Part 2 待集成）· 启动日期：2026-05-11
+- **状态**：✅ 完成（Part 1 核心加密层 + Part 2 集成）· 完成日期：2026-05-11
 - **价值**：⭐⭐⭐⭐  成本：中（约 1 天，分两步）
 - **依赖**：Phase 1-4 全部完成
 - **决策**（已与用户确认）：**独立"备份密码" + 整块 AES-256-GCM 加密**
-- **Part 1 ✅ 核心加密层（已完成）**：
-  - `services/sync.rs`：`encrypt_snapshot(zip, pw)` / `decrypt_snapshot(enc, pw)` / `is_encrypted_snapshot(bytes)`
+- **Part 1 ✅ 核心加密层**：
+  - `services/sync.rs`：`encrypt_snapshot(zip, pw)` / `decrypt_snapshot(enc, pw)` / `is_encrypted_snapshot(bytes)` / `file_is_encrypted_snapshot(path)`
     - 格式：`[MAGIC "KBSNCv1\0" 8B][salt 16B][nonce 12B + AES-GCM ciphertext+tag]`
     - 复用 `services::crypto` 的 Argon2id 派生 key + aead_encrypt/decrypt
-  - 备份密码存取：`save/get/delete_backup_password(db)`（hostname 派生 key 存 app_config，与 WebDAV 密码同机制）
-  - 7 个单测：加密往返 / 错误密码拒绝 / 明文不被误判 / 太短拒绝 / 空密码拒绝 / 非确定性 / 密码存取往返
-  - 函数暂带 `#[allow(dead_code)]`（Part 2 集成时去掉）
-- **Part 2 待做（集成）**：
-  - `webdav_push` / `export_to_file` 加 `backup_password: Option<&str>`：build 完 ZIP → 加密 → 上传 `.zip.enc`
-  - `webdav_pull` / `import_from_file`：下载后检测魔数 → 要密码 → 解密 → 解包
-  - `webdav_list_snapshots` / `webdav_preview` 兼容 `.zip.enc` 文件名
-  - Command 改造 + 4 个密码 Command（save/has/get/delete backup password）
-  - SyncSection UI：「加密备份」开关 + 密码输入 + 保存密码按钮（仿现有 WebDAV 密码 UI）
-  - 集成测试：加密 push → 拉回解密 → 数据一致
-
-#### T-S051 · 冲突合并 UI（三栏 diff）
+  - 备份密码存取：`save/get/delete_backup_password(db)`（hostname 派生 key 存 app_config，配置键 `sync.backup_pw_enc`，与 WebDAV 密码同机制）
+  - 10 个单测：加密往返 / 错误密码拒绝 / 明文不被误判 / 太短拒绝 / 空密码拒绝 / 非确定性 / 密码存取往返 / 加密导出导入端到端
+- **Part 2 ✅ 集成**：
+  - `export_to_file(...,backup_password)`：None=明文 ZIP；Some=先 build 到 `.sync-tmp-export.zip` → 加密落 target
+  - `import_from_file(...,backup_password)`：检测魔数 → 加密则解密 → 解包
+  - `webdav_push(...,backup_password)`：Some 时上传 `kb-sync-<host>.zip.enc`
+  - `webdav_pull(...,backup_password)`：有密码默认拉 `.zip.enc`；遇加密包但无密码 → Err
+  - `webdav_list_snapshots` / `webdav_preview` 兼容 `.zip.enc`（preview 对加密包返回明确报错）
+  - `commands/sync.rs`：4 个 Command 加 `backup_password` 参数 + 新增 `sync_save/has/get/delete_backup_password`，已在 `lib.rs` 注册
+  - `sync_scheduler.rs`：V0 调度器 `webdav_push` 调用补 `None`（自动同步暂不带备份加密）
+  - `src/lib/api/index.ts`：4 个同步 API 加 `backupPassword?` + `syncApi.saveBackupPassword/hasBackupPassword/getBackupPassword/deleteBackupPassword`
+  - `SyncSection.tsx`：「加密备份（端到端）」区块 — Switch 开关 + 密码输入 + 保存/清除按钮；导出/导入/push/pull/快照恢复全部接通备份密码；导出按钮文案随状态切换；导入文件选择器支持 `.enc`
+- **验证**：`npx tsc --noEmit` 0 错误；`cargo check` 0 警告；208 lib 测试通过
 
 #### T-S051 · 冲突合并 UI（三栏 diff）
 
@@ -491,5 +492,8 @@ Phase X (按需)        ──────► 端到端加密 / 冲突合并 UI
 - **Phase 5**：✅ 完成（T-S040）—— 2026-05-11
   - 收益：UI 文案区分"多端实时同步（推荐）"vs"快照归档"，V1 引导用户先重建附件索引
 
-🎉 **同步功能重构正式收官**。剩余 T-S025/T-S032/T-S050/T-S051 为可选增强项，
-不影响核心多端同步可用性，按需开启新任务即可。
+- **Phase X · 可选增强**：T-S050（V0 快照端到端加密）✅ 完成 —— 2026-05-11
+  - 收益：导出/推送的归档快照可整块 AES-256-GCM 加密，云端只见密文；独立"备份密码"
+
+🎉 **同步功能重构正式收官**。剩余 T-S025（V1 附件 GC，已部分落地）/T-S032（S3·Local 批量上传）/T-S051（冲突合并 UI）
+为可选增强项，不影响核心多端同步可用性，按需开启新任务即可。

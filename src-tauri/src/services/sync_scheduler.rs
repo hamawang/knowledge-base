@@ -152,6 +152,7 @@ pub async fn push_once(app: &AppHandle, origin: &str) {
         &url,
         &username,
         &password,
+        None, // V0 调度器（已禁用，保留兼容）：自动同步暂不带备份加密
     )
     .await;
 

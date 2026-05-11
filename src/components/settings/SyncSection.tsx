@@ -9,6 +9,7 @@ import {
   Modal,
   Radio,
   Space,
+  Switch,
   Tag,
   Typography,
   message,
@@ -98,6 +99,11 @@ export function SyncSection() {
   const [autoEnabled, setAutoEnabled] = useState(false);
   const [autoInterval, setAutoInterval] = useState(30);
 
+  // T-S050: 加密备份
+  const [backupEnabled, setBackupEnabled] = useState(false);
+  const [backupPassword, setBackupPassword] = useState("");
+  const [savingBackupPw, setSavingBackupPw] = useState(false);
+
   // 历史
   const [history, setHistory] = useState<SyncHistoryItem[]>([]);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -118,6 +124,13 @@ export function SyncSection() {
         setAutoEnabled(auto === "true");
         const interval = await configApi.get(CFG_KEY_INTERVAL).catch(() => "30");
         setAutoInterval(Number(interval) || 30);
+        // T-S050: 加载已保存的备份密码
+        const hasBackupPw = await syncApi.hasBackupPassword().catch(() => false);
+        if (hasBackupPw) {
+          setBackupEnabled(true);
+          const pw = await syncApi.getBackupPassword().catch(() => null);
+          if (pw) setBackupPassword(pw);
+        }
       } catch {}
       loadHistory();
     })();
@@ -147,17 +160,71 @@ export function SyncSection() {
     } catch {}
   }
 
+  /** T-S050: 取当前生效的备份密码（仅当开启加密 + 密码非空时返回，否则 undefined = 明文） */
+  function backupPwArg(): string | undefined {
+    const pw = backupPassword.trim();
+    return backupEnabled && pw ? pw : undefined;
+  }
+
+  async function handleToggleBackup(checked: boolean) {
+    if (!checked) {
+      // 关闭加密 → 顺手清掉已保存的备份密码（后续 push/导出回到明文 ZIP）
+      try {
+        await syncApi.deleteBackupPassword();
+      } catch {}
+      setBackupEnabled(false);
+      setBackupPassword("");
+      message.info("已关闭加密备份，后续推送/导出将使用明文 ZIP");
+      return;
+    }
+    setBackupEnabled(true);
+  }
+
+  async function handleSaveBackupPassword() {
+    const pw = backupPassword.trim();
+    if (!pw) {
+      message.warning("请先输入备份密码");
+      return;
+    }
+    setSavingBackupPw(true);
+    try {
+      await syncApi.saveBackupPassword(pw);
+      message.success("备份密码已保存");
+    } catch (e) {
+      message.error(`保存失败: ${e}`);
+    } finally {
+      setSavingBackupPw(false);
+    }
+  }
+
+  async function handleClearBackupPassword() {
+    setSavingBackupPw(true);
+    try {
+      await syncApi.deleteBackupPassword();
+      setBackupPassword("");
+      message.success("已清除已保存的备份密码");
+    } catch (e) {
+      message.error(`清除失败: ${e}`);
+    } finally {
+      setSavingBackupPw(false);
+    }
+  }
+
   // ─── 本地 ZIP ────────────────────────────────
 
   async function handleExport() {
+    const enc = backupPwArg();
+    const ext = enc ? "zip.enc" : "zip";
     const target = await save({
-      defaultPath: `knowledge-base-backup-${new Date().toISOString().slice(0, 10)}.zip`,
-      filters: [{ name: "ZIP", extensions: ["zip"] }],
+      defaultPath: `knowledge-base-backup-${new Date().toISOString().slice(0, 10)}.${ext}`,
+      filters: enc
+        ? [{ name: "加密备份", extensions: ["enc"] }]
+        : [{ name: "ZIP", extensions: ["zip"] }],
     });
     if (!target) return;
     setExporting(true);
     try {
-      const result = await syncApi.exportToFile(scope, target);
+      const result = await syncApi.exportToFile(scope, target, enc);
       message.success(
         `已导出：${result.stats.notesCount} 条笔记 / ${result.stats.imagesCount + result.stats.pdfsCount + result.stats.sourcesCount} 个资产`,
       );
@@ -172,7 +239,7 @@ export function SyncSection() {
   async function handleImport() {
     const selected = await open({
       multiple: false,
-      filters: [{ name: "ZIP", extensions: ["zip"] }],
+      filters: [{ name: "备份包", extensions: ["zip", "enc"] }],
     });
     if (!selected) return;
 
@@ -194,7 +261,12 @@ export function SyncSection() {
 
     setImporting(true);
     try {
-      const m = await syncApi.importFromFile(selected as string, importMode);
+      // T-S050: 加密文件需密码；这里直接把当前密码框的值传过去（后端检测魔数，明文文件会忽略密码）
+      const m = await syncApi.importFromFile(
+        selected as string,
+        importMode,
+        backupPassword.trim() || undefined,
+      );
       message.success(
         `已导入：来自 ${m.device}（${m.exportedAt}），${m.stats.notesCount} 条笔记`,
       );
@@ -275,7 +347,7 @@ export function SyncSection() {
     setPushing(true);
     try {
       const config = { url, username, password: password || undefined };
-      const result = await syncApi.webdavPush(scope, config);
+      const result = await syncApi.webdavPush(scope, config, backupPwArg());
       // 推送成功即证明配置可用，兜底落库（避免用户跳过测试直接推，下次重启丢配置）
       persistUrl(url);
       persistUsername(username);
@@ -307,7 +379,7 @@ export function SyncSection() {
     setPulling(true);
     try {
       const config = { url, username, password: password || undefined };
-      const m = await syncApi.webdavPull(importMode, config);
+      const m = await syncApi.webdavPull(importMode, config, undefined, backupPwArg());
       // 拉取成功即证明配置可用，兜底落库
       persistUrl(url);
       persistUsername(username);
@@ -362,7 +434,14 @@ export function SyncSection() {
     setPulling(true);
     try {
       const config = { url, username, password: password || undefined };
-      const m = await syncApi.webdavPull(importMode, config, snap.filename);
+      // 该快照若以 .enc 结尾说明是加密包，需要传备份密码
+      const needPw = snap.filename.endsWith(".enc");
+      const m = await syncApi.webdavPull(
+        importMode,
+        config,
+        snap.filename,
+        needPw ? backupPassword.trim() || undefined : undefined,
+      );
       message.success(
         `已从 ${snap.device} 拉取：${m.stats.notesCount} 条笔记（${m.exportedAt}）`,
       );
@@ -485,6 +564,35 @@ export function SyncSection() {
         </Radio.Group>
       </div>
 
+      <Divider style={{ margin: "12px 0" }}>加密备份（端到端）</Divider>
+
+      <div style={{ marginBottom: 4 }}>
+        <Space>
+          <Switch size="small" checked={backupEnabled} onChange={handleToggleBackup} />
+          <Text style={{ fontSize: 13 }}>启用加密备份</Text>
+        </Space>
+        <div style={{ fontSize: 12, color: "var(--ant-color-text-secondary, #888)", marginTop: 4 }}>
+          开启后，导出 / 推送生成的快照会用下方密码做 AES-256-GCM 整块加密（文件名 <code>.zip.enc</code>），云端只能看到密文。
+          <Text type="danger" style={{ fontSize: 12 }}> 忘记密码 = 无法恢复，请务必牢记。</Text>
+        </div>
+        {backupEnabled && (
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, maxWidth: 420 }}>
+            <Input.Password
+              placeholder="备份密码"
+              value={backupPassword}
+              onChange={(e) => setBackupPassword(e.target.value)}
+              style={{ flex: 1 }}
+            />
+            <Button onClick={handleSaveBackupPassword} loading={savingBackupPw}>
+              保存
+            </Button>
+            <Button onClick={handleClearBackupPassword} loading={savingBackupPw} danger>
+              清除
+            </Button>
+          </div>
+        )}
+      </div>
+
       <Divider style={{ margin: "12px 0" }}>本地 ZIP</Divider>
 
       <Space>
@@ -494,10 +602,10 @@ export function SyncSection() {
           onClick={handleExport}
           loading={exporting}
         >
-          导出到 ZIP
+          {backupPwArg() ? "导出加密备份" : "导出到 ZIP"}
         </Button>
         <Button icon={<DownloadOutlined />} onClick={handleImport} loading={importing}>
-          从 ZIP 导入
+          从备份导入
         </Button>
       </Space>
 

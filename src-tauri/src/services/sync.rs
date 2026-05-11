@@ -137,16 +137,44 @@ impl SyncService {
     }
 
     /// 导出到本地文件（流式写盘，不占用对等内存）
+    ///
+    /// `backup_password`：T-S050 端到端加密。None = 明文 ZIP；Some(pw) = 整块 AES-256-GCM 加密
+    /// （build 到临时文件 → 整体读入内存加密 → 写 target；大库 >100MB 注意内存峰值）
     pub fn export_to_file(
         data_dir: &Path,
         db: &Database,
         scope: &SyncScope,
         app_version: &str,
         target_path: &Path,
+        backup_password: Option<&str>,
     ) -> Result<SyncResult, AppError> {
-        let file = fs::File::create(target_path)?;
-        let writer = BufWriter::new(file);
-        let stats = Self::build_snapshot_to_writer(writer, data_dir, db, scope, app_version)?;
+        let stats = match backup_password {
+            None => {
+                let file = fs::File::create(target_path)?;
+                let writer = BufWriter::new(file);
+                Self::build_snapshot_to_writer(writer, data_dir, db, scope, app_version)?
+            }
+            Some(pw) => {
+                // 先 build 到临时文件，再加密写 target
+                let tmp = data_dir.join(".sync-tmp-export.zip");
+                let _ = fs::remove_file(&tmp);
+                let stats = {
+                    let file = fs::File::create(&tmp)?;
+                    Self::build_snapshot_to_writer(
+                        BufWriter::new(file),
+                        data_dir,
+                        db,
+                        scope,
+                        app_version,
+                    )?
+                };
+                let zip_bytes = fs::read(&tmp)?;
+                let _ = fs::remove_file(&tmp);
+                let enc = Self::encrypt_snapshot(&zip_bytes, pw)?;
+                fs::write(target_path, &enc)?;
+                stats
+            }
+        };
         Ok(SyncResult {
             stats,
             finished_at: chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
@@ -321,21 +349,44 @@ impl SyncService {
     }
 
     /// 从本地文件导入（流式读取，避免把整份 ZIP 载入内存）
+    /// 从本地文件导入。T-S050：自动检测魔数 —— 是加密快照则必须提供 `backup_password` 解密。
     pub fn import_from_file(
         data_dir: &Path,
         db_path: &Path,
         source_path: &Path,
         mode: SyncImportMode,
+        backup_password: Option<&str>,
     ) -> Result<SyncManifest, AppError> {
-        let file = fs::File::open(source_path)?;
-        let reader = BufReader::new(file);
-        Self::apply_snapshot_from_reader(data_dir, db_path, reader, mode)
+        if Self::file_is_encrypted_snapshot(source_path)? {
+            let pw = backup_password.ok_or_else(|| {
+                AppError::Custom("该备份文件已加密，请提供备份密码后再导入".into())
+            })?;
+            let enc_bytes = fs::read(source_path)?;
+            let zip_bytes = Self::decrypt_snapshot(&enc_bytes, pw)?;
+            let reader = Cursor::new(zip_bytes);
+            Self::apply_snapshot_from_reader(data_dir, db_path, reader, mode)
+        } else {
+            let file = fs::File::open(source_path)?;
+            let reader = BufReader::new(file);
+            Self::apply_snapshot_from_reader(data_dir, db_path, reader, mode)
+        }
+    }
+
+    /// 读文件首 8 字节判是否是加密快照（轻量探测，不读全文件）
+    fn file_is_encrypted_snapshot(path: &Path) -> Result<bool, AppError> {
+        let mut f = fs::File::open(path)?;
+        let mut head = [0u8; 8];
+        let n = f.read(&mut head)?;
+        Ok(n == 8 && Self::is_encrypted_snapshot(&head))
     }
 
     // ─── WebDAV 云同步 ──────────────────────────
 
     /// 推送到 WebDAV：先把快照流式写入临时文件，再流式上传，
-    /// 全程不把整份 ZIP 驻留在内存中。
+    /// 全程不把整份 ZIP 驻留在内存中（明文路径）。
+    ///
+    /// `backup_password`：T-S050 端到端加密。Some(pw) → 上传 `kb-sync-<host>.zip.enc`（密文）；
+    /// None → 上传 `kb-sync-<host>.zip`（明文，向后兼容）。
     pub async fn webdav_push(
         data_dir: &Path,
         db: &Database,
@@ -344,6 +395,7 @@ impl SyncService {
         url: &str,
         username: &str,
         password: &str,
+        backup_password: Option<&str>,
     ) -> Result<SyncResult, AppError> {
         let tmp_zip = data_dir.join(".sync-tmp-upload.zip");
         let _ = fs::remove_file(&tmp_zip);
@@ -355,11 +407,34 @@ impl SyncService {
             Self::build_snapshot_to_writer(writer, data_dir, db, scope, app_version)?
         };
 
-        // 2. 流式上传临时文件，无论成败都清理临时文件
-        let filename = device_zip_name();
+        // 2. 决定上传内容：明文直接传临时 ZIP；加密则读 → encrypt → 写 .enc 临时文件
+        let (filename, upload_path) = match backup_password {
+            None => (device_zip_name(), tmp_zip.clone()),
+            Some(pw) => {
+                let zip_bytes = fs::read(&tmp_zip)?;
+                let enc = match Self::encrypt_snapshot(&zip_bytes, pw) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        let _ = fs::remove_file(&tmp_zip);
+                        return Err(e);
+                    }
+                };
+                let tmp_enc = data_dir.join(".sync-tmp-upload.zip.enc");
+                let _ = fs::remove_file(&tmp_enc);
+                if let Err(e) = fs::write(&tmp_enc, &enc) {
+                    let _ = fs::remove_file(&tmp_zip);
+                    return Err(e.into());
+                }
+                let _ = fs::remove_file(&tmp_zip); // 明文 ZIP 不再需要，及时清理
+                (format!("{}.enc", device_zip_name()), tmp_enc)
+            }
+        };
+
+        // 3. 上传，无论成败清理临时文件
         let client = WebDavClient::new(url, username, password);
-        let upload_result = client.upload_file(&filename, &tmp_zip).await;
-        let _ = fs::remove_file(&tmp_zip);
+        let upload_result = client.upload_file(&filename, &upload_path).await;
+        let _ = fs::remove_file(&upload_path);
+        let _ = fs::remove_file(&tmp_zip); // 兜底（明文路径已删过，加密路径也删过，这里 noop）
         upload_result?;
 
         Ok(SyncResult {
@@ -368,8 +443,10 @@ impl SyncService {
         })
     }
 
-    /// 从 WebDAV 拉取：先流式下载到临时文件，再流式解包，
-    /// 避免把整份 ZIP 驻留在内存中。
+    /// 从 WebDAV 拉取：先流式下载到临时文件，检测魔数后（必要时解密）再流式解包。
+    ///
+    /// `backup_password`：T-S050。提供时默认拉 `kb-sync-<host>.zip.enc`；未提供拉 `.zip`。
+    /// 若下载到的是加密快照但没提供密码 → Err。`preferred_filename` 优先于默认推断。
     pub async fn webdav_pull(
         data_dir: &Path,
         db_path: &Path,
@@ -378,34 +455,86 @@ impl SyncService {
         username: &str,
         password: &str,
         preferred_filename: Option<&str>,
+        backup_password: Option<&str>,
     ) -> Result<SyncManifest, AppError> {
         let client = WebDavClient::new(url, username, password);
-        let filename = preferred_filename
-            .map(|s| s.to_string())
-            .unwrap_or_else(device_zip_name);
+        let filename = match preferred_filename {
+            Some(s) => s.to_string(),
+            None => {
+                if backup_password.is_some() {
+                    format!("{}.enc", device_zip_name())
+                } else {
+                    device_zip_name()
+                }
+            }
+        };
 
-        let tmp_zip = data_dir.join(".sync-tmp-pull.zip");
-        let _ = fs::remove_file(&tmp_zip);
+        let tmp_dl = data_dir.join(".sync-tmp-pull.dl");
+        let _ = fs::remove_file(&tmp_dl);
 
         // 1. 流式下载到临时文件
-        if let Err(e) = client.download_to_file(&filename, &tmp_zip).await {
-            let _ = fs::remove_file(&tmp_zip);
+        if let Err(e) = client.download_to_file(&filename, &tmp_dl).await {
+            let _ = fs::remove_file(&tmp_dl);
             return Err(e);
         }
 
-        // 2. 流式读取并展开
+        // 2. 检测是否加密；是则解密成明文 ZIP 临时文件
+        let zip_path = match Self::file_is_encrypted_snapshot(&tmp_dl) {
+            Ok(true) => {
+                let pw = match backup_password {
+                    Some(p) => p,
+                    None => {
+                        let _ = fs::remove_file(&tmp_dl);
+                        return Err(AppError::Custom(
+                            "云端快照已加密，请在拉取时提供备份密码".into(),
+                        ));
+                    }
+                };
+                let enc_bytes = match fs::read(&tmp_dl) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        let _ = fs::remove_file(&tmp_dl);
+                        return Err(e.into());
+                    }
+                };
+                let zip_bytes = match Self::decrypt_snapshot(&enc_bytes, pw) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        let _ = fs::remove_file(&tmp_dl);
+                        return Err(e);
+                    }
+                };
+                let tmp_zip = data_dir.join(".sync-tmp-pull.zip");
+                let _ = fs::remove_file(&tmp_zip);
+                if let Err(e) = fs::write(&tmp_zip, &zip_bytes) {
+                    let _ = fs::remove_file(&tmp_dl);
+                    return Err(e.into());
+                }
+                let _ = fs::remove_file(&tmp_dl);
+                tmp_zip
+            }
+            Ok(false) => tmp_dl.clone(), // 明文，直接用下载文件
+            Err(e) => {
+                let _ = fs::remove_file(&tmp_dl);
+                return Err(e);
+            }
+        };
+
+        // 3. 流式读取并展开
         let apply_result = (|| {
-            let file = fs::File::open(&tmp_zip)?;
+            let file = fs::File::open(&zip_path)?;
             let reader = BufReader::new(file);
             Self::apply_snapshot_from_reader(data_dir, db_path, reader, mode)
         })();
 
-        let _ = fs::remove_file(&tmp_zip);
+        let _ = fs::remove_file(&zip_path);
+        let _ = fs::remove_file(&tmp_dl);
         apply_result
     }
 
-    /// 列出云端所有 `kb-sync-*.zip` 快照（多设备场景）
-    /// 返回 (filename, device_name) 元组列表，按设备名排序
+    /// 列出云端所有快照（多设备场景）。兼容明文 `kb-sync-*.zip` 和加密 `kb-sync-*.zip.enc`。
+    /// 返回 (filename, device_name) 元组列表，按设备名排序。
+    /// 调用方可从 `filename` 是否以 `.enc` 结尾判断该快照是否加密。
     pub async fn webdav_list_snapshots(
         url: &str,
         username: &str,
@@ -415,21 +544,27 @@ impl SyncService {
         let files = client.list_files().await?;
         let mut snapshots: Vec<(String, String)> = files
             .into_iter()
-            .filter(|f| f.starts_with("kb-sync-") && f.ends_with(".zip"))
-            .map(|f| {
-                // kb-sync-<device>.zip → 提取 <device>
-                let device = f
-                    .trim_start_matches("kb-sync-")
-                    .trim_end_matches(".zip")
-                    .to_string();
-                (f, device)
+            .filter_map(|f| {
+                if !f.starts_with("kb-sync-") {
+                    return None;
+                }
+                // 先剥 .zip.enc，再剥 .zip；都不匹配则忽略
+                let device = if let Some(d) = f.strip_suffix(".zip.enc") {
+                    d.trim_start_matches("kb-sync-").to_string()
+                } else if let Some(d) = f.strip_suffix(".zip") {
+                    d.trim_start_matches("kb-sync-").to_string()
+                } else {
+                    return None;
+                };
+                Some((f, device))
             })
             .collect();
         snapshots.sort_by(|a, b| a.1.cmp(&b.1));
         Ok(snapshots)
     }
 
-    /// 预览云端 manifest（不下载资产，只读 manifest.json）
+    /// 预览云端 manifest（不下载资产，只读 manifest.json）。
+    /// 加密快照无法在不解密的情况下读 manifest → 返回明确错误，引导用户直接恢复。
     pub async fn webdav_preview(
         url: &str,
         username: &str,
@@ -441,6 +576,11 @@ impl SyncService {
             .map(|s| s.to_string())
             .unwrap_or_else(device_zip_name);
         let bytes = client.download_bytes(&fname).await?;
+        if Self::is_encrypted_snapshot(&bytes) {
+            return Err(AppError::Custom(
+                "该快照已加密，无法预览内容清单；如需恢复请在恢复时输入备份密码".into(),
+            ));
+        }
         let reader = Cursor::new(bytes);
         let mut archive = ZipArchive::new(reader)
             .map_err(|e| AppError::Custom(format!("解析云端 ZIP 失败: {}", e)))?;
@@ -543,7 +683,6 @@ impl SyncService {
     /// （后段就是 `crypto::aead_encrypt` 的输出 = `nonce ‖ ciphertext+tag`）
     /// - salt 公开存放在文件里是安全的（Argon2 设计如此）
     /// - **整块加密**：zip 字节全部进内存（大库 >100MB 注意内存峰值；快照归档通常阶段性手动操作）
-    #[allow(dead_code)] // T-S050 Part 2 集成到 webdav_push / export_to_file 时启用
     pub fn encrypt_snapshot(zip: &[u8], password: &str) -> Result<Vec<u8>, AppError> {
         if password.is_empty() {
             return Err(AppError::Custom("备份密码不能为空".into()));
@@ -559,7 +698,6 @@ impl SyncService {
     }
 
     /// 解密快照文件 → ZIP 字节。密码错误 / 文件损坏 / 魔数不匹配 → Err。
-    #[allow(dead_code)] // T-S050 Part 2 集成到 webdav_pull / import_from_file 时启用
     pub fn decrypt_snapshot(enc: &[u8], password: &str) -> Result<Vec<u8>, AppError> {
         let min_len = SNAPSHOT_MAGIC.len() + crypto::SALT_LEN + crypto::NONCE_LEN + 16; // +16 GCM tag
         if enc.len() < min_len {
@@ -578,20 +716,17 @@ impl SyncService {
     }
 
     /// 检查字节流是否是加密快照（看魔数头）。明文 ZIP 以 `PK\x03\x04` 开头，不会误判。
-    #[allow(dead_code)] // T-S050 Part 2 集成到 webdav_pull / import_from_file 时启用
     pub fn is_encrypted_snapshot(bytes: &[u8]) -> bool {
         bytes.len() >= SNAPSHOT_MAGIC.len() && &bytes[..SNAPSHOT_MAGIC.len()] == SNAPSHOT_MAGIC
     }
 
     // ─── 备份密码存取（与 WebDAV 密码同机制：hostname 派生 key + AES-GCM 存 app_config）─────
 
-    #[allow(dead_code)] // T-S050 Part 2 启用
     fn backup_pw_config_key() -> &'static str {
         "sync.backup_pw_enc"
     }
 
     /// 把备份密码加密后存入 SQLite（换设备无法解密 → 需重新填）
-    #[allow(dead_code)] // T-S050 Part 2 启用
     pub fn save_backup_password(db: &Database, password: &str) -> Result<(), AppError> {
         if password.is_empty() {
             return Err(AppError::Custom("备份密码不能为空".into()));
@@ -602,7 +737,6 @@ impl SyncService {
     }
 
     /// 从 SQLite 读备份密码密文并解密；解不开（换设备）返回 None
-    #[allow(dead_code)] // T-S050 Part 2 启用
     pub fn get_backup_password(db: &Database) -> Result<Option<String>, AppError> {
         match db.get_config(Self::backup_pw_config_key())? {
             Some(enc) if !enc.is_empty() => crypto::decrypt(&enc).map(Some),
@@ -611,7 +745,6 @@ impl SyncService {
     }
 
     /// 删除 SQLite 中的备份密码密文（关闭加密备份时调）
-    #[allow(dead_code)] // T-S050 Part 2 启用
     pub fn delete_backup_password(db: &Database) -> Result<(), AppError> {
         let _ = db.delete_config(Self::backup_pw_config_key())?;
         Ok(())
@@ -622,7 +755,6 @@ impl SyncService {
 ///
 /// 用来识别"这是加密包"，与明文 ZIP（`PK\x03\x04` 开头）区分。
 /// 后缀 `\0` 占位 + 版本位，未来格式变更时可用首字节区分。
-#[allow(dead_code)] // T-S050 Part 2 启用
 const SNAPSHOT_MAGIC: &[u8; 8] = b"KBSNCv1\0";
 
 // ─── 辅助函数 ─────────────────────────────────
@@ -780,6 +912,110 @@ mod tests {
         // 删
         SyncService::delete_backup_password(&db).unwrap();
         assert_eq!(SyncService::get_backup_password(&db).unwrap(), None);
+    }
+
+    /// T-S050 Part 2 端到端：明文导出 → 加密导出 → 加密导入还原
+    #[test]
+    fn export_import_encrypted_roundtrip() {
+        use crate::models::NoteInput;
+
+        // 临时 data_dir + 一个有内容的 db
+        let tmp = std::env::temp_dir().join(format!(
+            "kb-snap-enc-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&tmp).unwrap();
+        let src_db_path = tmp.join("src-app.db");
+        let db = Database::init(src_db_path.to_str().unwrap()).unwrap();
+        db.create_note(&NoteInput {
+            title: "加密备份测试笔记".into(),
+            content: "secret content xyz".into(),
+            folder_id: None,
+        })
+        .unwrap();
+        let scope = SyncScope {
+            notes: true,
+            images: false,
+            pdfs: false,
+            sources: false,
+            settings: false,
+        };
+
+        // 明文导出
+        let plain_zip = tmp.join("backup.zip");
+        SyncService::export_to_file(&tmp, &db, &scope, "test", &plain_zip, None).unwrap();
+        let plain_head = {
+            let mut f = fs::File::open(&plain_zip).unwrap();
+            let mut h = [0u8; 4];
+            f.read_exact(&mut h).unwrap();
+            h
+        };
+        assert_eq!(&plain_head, b"PK\x03\x04", "明文导出应是标准 ZIP");
+
+        // 加密导出
+        let enc_zip = tmp.join("backup.zip.enc");
+        SyncService::export_to_file(&tmp, &db, &scope, "test", &enc_zip, Some("my-pw")).unwrap();
+        let enc_head = {
+            let mut f = fs::File::open(&enc_zip).unwrap();
+            let mut h = [0u8; 8];
+            f.read_exact(&mut h).unwrap();
+            h
+        };
+        assert_eq!(&enc_head, SNAPSHOT_MAGIC, "加密导出应带魔数头");
+
+        // 释放 src db 占用，准备导入到一个新的 dest db
+        db.release().ok();
+        drop(db);
+        let dest_db_path = tmp.join("dest-app.db");
+        // 先建个空 dest db（import overwrite 会替换它）
+        Database::init(dest_db_path.to_str().unwrap()).unwrap().release().ok();
+
+        // 用错误密码导入 → 失败
+        let bad = SyncService::import_from_file(
+            &tmp,
+            &dest_db_path,
+            &enc_zip,
+            SyncImportMode::Overwrite,
+            Some("wrong-pw"),
+        );
+        assert!(bad.is_err(), "错误密码导入应失败");
+
+        // 不给密码导入加密包 → 失败
+        let no_pw = SyncService::import_from_file(
+            &tmp,
+            &dest_db_path,
+            &enc_zip,
+            SyncImportMode::Overwrite,
+            None,
+        );
+        assert!(no_pw.is_err(), "加密包未给密码应失败");
+
+        // 正确密码导入 → 成功
+        SyncService::import_from_file(
+            &tmp,
+            &dest_db_path,
+            &enc_zip,
+            SyncImportMode::Overwrite,
+            Some("my-pw"),
+        )
+        .unwrap();
+        // 验证 dest db 里有那条笔记
+        let dest = Database::init(dest_db_path.to_str().unwrap()).unwrap();
+        let n = {
+            let conn = dest.conn_lock().unwrap();
+            conn.query_row(
+                "SELECT title FROM notes WHERE title = '加密备份测试笔记'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+        };
+        assert_eq!(n.as_deref(), Some("加密备份测试笔记"), "导入的笔记应存在");
+
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     /// 临时目录内放 4 类文件：3 个 `.sync-tmp-*` 应被删，2 个业务文件必须保留。

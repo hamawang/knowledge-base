@@ -1089,6 +1089,10 @@ pub fn run() {
             commands::sync::sync_has_webdav_password,
             commands::sync::sync_get_webdav_password,
             commands::sync::sync_delete_webdav_password,
+            commands::sync::sync_save_backup_password,
+            commands::sync::sync_has_backup_password,
+            commands::sync::sync_get_backup_password,
+            commands::sync::sync_delete_backup_password,
             commands::sync::sync_list_history,
             commands::sync::sync_scheduler_reload,
             // 闪卡 + FSRS 复习
