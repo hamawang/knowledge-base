@@ -6,8 +6,12 @@
  *  - 笔记 vs 笔记：左 = 另一篇（可编辑），右 = 当前/目标笔记（可编辑），▶ 把另一篇的块拉进目标
  *
  * 保存：onSave 提供时右下角出现「保存更改」，回调拿到两侧编辑后的最终文本，由调用方决定怎么写回。
+ *
+ * 实现要点：MergeView 是命令式 DOM 库，需要一个已挂载的容器节点 —— 用 **callback ref** 在 div 真正
+ * 挂进 DOM 那一刻创建（避免 antd Modal 的内容异步挂载导致 `useEffect` 里 ref 还是 null、整片空白）。
+ * 配合 Modal `destroyOnClose`：关弹窗时 div 卸载 → callback ref 收到 null → 销毁；重开时拿到新内容重建。
  */
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { Alert, Button, Modal, Space } from "antd";
 import { MergeView } from "@codemirror/merge";
 import { EditorView, lineNumbers } from "@codemirror/view";
@@ -32,10 +36,9 @@ interface Props {
   saveHint?: string;
 }
 
-// CodeMirror 主题：跟随 app 暗色 / 亮色；让编辑器填满固定高度容器并各自滚动
+// 高度：用 .cm-scroller 的 maxHeight 直接限高（不走 height:100% 链，更稳）；短内容也给个 minHeight
 const sizingTheme = EditorView.theme({
-  "&": { height: "100%" },
-  ".cm-scroller": { overflow: "auto" },
+  ".cm-scroller": { overflowY: "auto", maxHeight: "62vh", minHeight: "160px" },
 });
 const darkTheme = EditorView.theme(
   {
@@ -77,17 +80,24 @@ function sideExtensions(editable: boolean, dark: boolean) {
 
 export function DiffMergeModal({ open, onClose, left, right, onSave, saveHint }: Props) {
   const dark = useAppStore((s) => s.themeCategory) === "dark";
-  const hostRef = useRef<HTMLDivElement | null>(null);
   const mvRef = useRef<MergeView | null>(null);
+  // callback ref 用 [] 依赖，闭包里读不到最新 props；用一个 ref 兜住最新值
+  const latest = useRef({ left, right, dark });
+  latest.current = { left, right, dark };
   const [saving, setSaving] = useState(false);
 
-  useEffect(() => {
-    if (!open || !hostRef.current) return;
-    mvRef.current?.destroy();
-    const mv = new MergeView({
+  // div 挂载 → 创建 MergeView；卸载（destroyOnClose）→ 销毁
+  const setHostEl = useCallback((el: HTMLDivElement | null) => {
+    if (mvRef.current) {
+      mvRef.current.destroy();
+      mvRef.current = null;
+    }
+    if (!el) return;
+    const { left, right, dark } = latest.current;
+    mvRef.current = new MergeView({
       a: { doc: left.value, extensions: sideExtensions(left.editable, dark) },
       b: { doc: right.value, extensions: sideExtensions(right.editable, dark) },
-      parent: hostRef.current,
+      parent: el,
       orientation: "a-b",
       // 中缝 ▶：把左(a)的变更块覆盖到右(b)。右侧 = 最终结果。
       revertControls: "a-to-b",
@@ -95,13 +105,7 @@ export function DiffMergeModal({ open, onClose, left, right, onSave, saveHint }:
       gutter: true,
       collapseUnchanged: { margin: 3, minSize: 4 },
     });
-    mvRef.current = mv;
-    return () => {
-      mv.destroy();
-      mvRef.current = null;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, left.value, right.value, left.editable, right.editable, left.label, right.label, dark]);
+  }, []);
 
   async function handleSave() {
     if (!onSave || !mvRef.current) return;
@@ -112,7 +116,7 @@ export function DiffMergeModal({ open, onClose, left, right, onSave, saveHint }:
       await onSave({ left: leftDoc, right: rightDoc });
       onClose();
     } catch (e) {
-      // 调用方应在 onSave 内自行 message.error；这里兜底不吞异常的副作用
+      // 调用方应在 onSave 内自行 message.error；这里只兜底打日志
       console.error("[DiffMergeModal] onSave 失败:", e);
     } finally {
       setSaving(false);
@@ -123,6 +127,7 @@ export function DiffMergeModal({ open, onClose, left, right, onSave, saveHint }:
     <Modal
       open={open}
       onCancel={onClose}
+      destroyOnClose
       title={`${left.label}  ↔  ${right.label}`}
       width="92vw"
       style={{ top: 16, maxWidth: 1400 }}
@@ -150,9 +155,8 @@ export function DiffMergeModal({ open, onClose, left, right, onSave, saveHint }:
         {right.editable ? "" : "（只读）"}。中缝 ▶ 把左侧变更块覆盖到右侧；两栏均可直接编辑。
       </div>
       <div
-        ref={hostRef}
+        ref={setHostEl}
         style={{
-          height: "62vh",
           border: "1px solid var(--ant-color-border-secondary, #eee)",
           borderRadius: 6,
           overflow: "hidden",
