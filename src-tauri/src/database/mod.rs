@@ -3,6 +3,7 @@ pub mod cards;
 pub mod folders;
 pub mod links;
 pub mod mcp_servers;
+pub mod note_attachments;
 pub mod notes;
 pub mod prompt;
 pub mod schema;

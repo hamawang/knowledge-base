@@ -256,116 +256,69 @@
 
 ---
 
-### Phase 3 · CAS 附件同步（核心收益，3-5 天）
+### Phase 3 · 附件同步（sidecar CAS 方案 B，2-3 天）
 
-#### T-S020 · CAS 目录结构设计 + 原型验证
+> **方案 B 设计哲学**：本地目录结构原样保留（`kb_assets/images/`、`pdfs/`、`sources/`、`kb_assets/attachments/<note_id>/`），
+> 仅在**同步阶段**走 CAS（内容寻址）远端布局。新增 `note_attachments` 索引表记录 (note_id, local_rel_path, sha256)，
+> 同步时按 sha256 去重上传到远端 `attachments/<aa>/<bb>/<hash>.<ext>`。
+>
+> **零本地迁移风险**：不动现有文件、不重写笔记 content；用户感知零变化。
 
-- **状态**：`pending`
-- **价值**：⭐⭐⭐⭐⭐  成本：低（半天）
+#### T-S020 · `note_attachments` 表 schema（v36→v37）
+
+- **状态**：`completed` · 完成日期：2026-05-11
+- **价值**：⭐⭐⭐⭐⭐  成本：低（30 min）
 - **依赖**：无
-- **决策点**：
-  - 目录布局：`attachments/<前2位hash>/<次2位hash>/<完整hash>.<ext>`（防单目录文件过多）
-  - hash 算法：BLAKE3（快 5-10 倍）vs SHA-256（依赖已有）→ 倾向 SHA-256（与笔记 content_hash 一致）
 - **子任务**：
-  - [ ] 写一个独立 spike：扫一次 `kb_assets/` 计算 hash 分布，看打散是否均匀
-  - [ ] 决策文档放 `docs/decisions/sync-cas-design.md`
+  - [x] schema 迁移 v36→v37：note_attachments 表 + hash 索引 + note_id 索引 + 外键 CASCADE
+  - [x] 新文件 `database/note_attachments.rs` + DAO 4 个：upsert / list_for_note / list_all_unique / find_by_hash
+  - [x] 6 个单测：表创建 / upsert 覆盖 / 列表 / hash 去重 / 反查 / CASCADE
+  - [x] 全 lib 174 个单测通过
 
----
-
-#### T-S021 · `note_attachments` 关联表 schema
+#### T-S021 · 资产引用扫描器
 
 - **状态**：`pending`
-- **价值**：⭐⭐⭐⭐⭐  成本：低（半天）
+- **价值**：⭐⭐⭐⭐⭐  成本：中（0.5 天）
 - **依赖**：T-S020
 - **子任务**：
-  - [ ] schema 迁移：
-    ```sql
-    CREATE TABLE note_attachments (
-      hash TEXT PRIMARY KEY,
-      original_name TEXT,
-      ext TEXT,
-      size INTEGER,
-      mime TEXT,
-      created_at DATETIME
-    );
-    CREATE TABLE note_attachment_refs (
-      note_id INTEGER,
-      hash TEXT,
-      PRIMARY KEY (note_id, hash),
-      FOREIGN KEY (note_id) REFERENCES notes(id),
-      FOREIGN KEY (hash) REFERENCES note_attachments(hash)
-    );
-    ```
-  - [ ] DAO：`upsert_attachment` / `link_note_attachment` / `list_orphan_attachments`
+  - [ ] services/sync_v1/attachment_scan.rs::scan_note_attachments：正则匹配 markdown 引用 + wiki 嵌入
+  - [ ] 计算 sha256 + size + mime
+  - [ ] upsert 到 note_attachments
 
----
-
-#### T-S022 · 资产入库扫描器（一次性 backfill 现有 kb_assets）
+#### T-S022 · manifest 加 `attachments` 字段
 
 - **状态**：`pending`
-- **价值**：⭐⭐⭐⭐⭐  成本：中（1 天）
-- **依赖**：T-S021
-- **解决问题**：把现有 `kb_assets/`、`pdfs/`、`sources/` 全部按 hash 重命名搬到 `attachments/`，并建索引
-- **子任务**：
-  - [ ] 扫描器：递归 `kb_assets/`，对每个文件算 hash，搬到 `attachments/<aa>/<bb>/<hash>.<ext>`
-  - [ ] 同时扫描所有笔记 content，发现引用 → 写 `note_attachment_refs`
-  - [ ] 旧路径保留软链/兼容查找（防止 markdown 引用 broken）
-  - [ ] 进度事件：扫描中显示百分比
-- **风险**：极高 —— 文件搬移失败会丢素材。必须先 dry-run 给报告，用户确认才执行
-
----
-
-#### T-S023 · 笔记 markdown 引用重写
-
-- **状态**：`pending`
-- **价值**：⭐⭐⭐⭐  成本：中（半天）
-- **依赖**：T-S022
-- **子任务**：
-  - [ ] 写 `rewrite_md_refs(content) -> content`：把 `kb_assets/xxx.png` 替换为 `attachments/<hash>.<ext>`
-  - [ ] backfill：迁移时对所有笔记 content 跑一次重写
-  - [ ] 编辑器侧：保存笔记前自动跑重写（新插入的图片也会进 CAS）
-  - [ ] 渲染侧：`attachments/<hash>.ext` 路径解析回真实 CAS 文件
-
----
-
-#### T-S024 · backend trait 实现 `put_attachment` / `get_attachment`
-
-- **状态**：`pending`
-- **价值**：⭐⭐⭐⭐⭐  成本：低（半天）
+- **价值**：⭐⭐⭐⭐  成本：低（30 min）
 - **依赖**：T-S020
 - **子任务**：
-  - [ ] `backend_local.rs`：直接复制文件到目标 root + 同名 hash
-  - [ ] `backend_webdav.rs`：PUT `<root>/attachments/<aa>/<bb>/<hash>.<ext>`，HEAD 检查存在跳过
-  - [ ] `backend_s3.rs`：PutObject + HeadObject 检查存在
-  - [ ] trait 加 `list_remote_attachments() -> HashSet<String>`（PROPFIND / ListObjects 实现）
+  - [ ] SyncManifestV1.attachments: Vec<AttachmentEntry> 顶层字段
+  - [ ] compute_local_manifest 时填充
 
----
-
-#### T-S025 · V1 push/pull 集成附件同步
+#### T-S023 · backend trait 附件 IO
 
 - **状态**：`pending`
-- **价值**：⭐⭐⭐⭐⭐  成本：中（1 天）
+- **价值**：⭐⭐⭐⭐⭐  成本：中（0.5 天）
+- **依赖**：T-S020
+- **子任务**：
+  - [ ] trait put_attachment / get_attachment / has_attachment 三方法去 dead_code 并实现
+  - [ ] backend_local / backend_webdav / backend_s3 各自实现
+
+#### T-S024 · push/pull 集成附件同步
+
+- **状态**：`pending`
+- **价值**：⭐⭐⭐⭐⭐  成本：中（0.5 天）
+- **依赖**：T-S022 + T-S023
+- **子任务**：
+  - [ ] push：本地 unique hashes - has_attachment 远端 → 上传缺失的
+  - [ ] pull：远端 manifest.attachments - 本地 unique hashes → 下载缺失的到 sync_in/
+
+#### T-S025 · 孤儿附件 GC（可选）
+
+- **状态**：`pending`
+- **价值**：⭐⭐⭐  成本：低（0.5 天）
 - **依赖**：T-S024
-- **子任务**：
-  - [ ] push：算 `to_push_attachments = local_hashes - remote_hashes`，并发上传
-  - [ ] pull：解析远端笔记 .md 引用 → 找出本地缺失的 hash → 并发下载到 `attachments/`
-  - [ ] manifest 加 `attachments: [{hash, size, mime}]` 字段
-  - [ ] 进度事件：`phase: "attachments"` 显示当前 X/N 个
 
 ---
-
-#### T-S026 · 孤儿附件 GC
-
-- **状态**：`pending`
-- **价值**：⭐⭐⭐  成本：低（半天）
-- **依赖**：T-S025
-- **子任务**：
-  - [ ] 后台任务（启动时 + 定时）：找出 `note_attachments` 中没有 `note_attachment_refs` 引用的 hash
-  - [ ] 保留 7 天宽限期再删（防误删，避免短暂引用断链）
-  - [ ] UI 设置项：手动触发 + 显示可回收空间
-
----
-
 ### Phase 4 · 并发提速（1-2 天）
 
 #### T-S030 · trait 加 `batch_put_notes` 默认实现

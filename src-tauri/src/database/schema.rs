@@ -3,7 +3,7 @@ use rusqlite::Connection;
 use crate::error::AppError;
 
 /// 当前 Schema 版本
-pub const SCHEMA_VERSION: i32 = 36;
+pub const SCHEMA_VERSION: i32 = 37;
 
 /// 获取数据库版本
 pub fn get_version(conn: &Connection) -> Result<i32, AppError> {
@@ -66,6 +66,7 @@ pub fn migrate(conn: &Connection) -> Result<(), AppError> {
             33 => migrate_v33_to_v34(conn)?,
             34 => migrate_v34_to_v35(conn)?,
             35 => migrate_v35_to_v36(conn)?,
+            36 => migrate_v36_to_v37(conn)?,
             _ => {
                 return Err(AppError::Custom(format!("未知的数据库版本: {}", version)));
             }
@@ -1492,5 +1493,44 @@ fn migrate_v35_to_v36(conn: &Connection) -> Result<(), AppError> {
     )?;
 
     set_version(conn, 36)?;
+    Ok(())
+}
+
+/// v36 -> v37: note_attachments 表（T-S020 sidecar CAS 附件同步索引）
+///
+/// 记录每条笔记引用了哪些本地资产文件（`kb_assets/images/...` / `pdfs/...` / `sources/...` 等），
+/// 以及内容 sha256 hex —— 同步时按 hash 去重上传，远端走 CAS 平铺。
+///
+/// 设计取舍：**不动现有本地目录结构**，本表是 sidecar 索引；同步流程通过此表知道
+/// "哪些文件要上传 / 远端哪些已经有了"。本地 markdown 引用保持原相对路径，零迁移风险。
+///
+/// 字段语义：
+/// - `note_id`：所属笔记（CASCADE：笔记物理删除时一同清理引用）
+/// - `local_rel_path`：相对 data_dir 的 POSIX 路径，例如 `kb_assets/images/abc.png`
+/// - `sha256_hex`：文件内容 hash，决定远端文件名
+/// - `size` / `mime`：元数据，供 UI 显示和远端 manifest 用
+fn migrate_v36_to_v37(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v36 -> v37 (note_attachments 索引表 - sidecar CAS)");
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS note_attachments (
+            note_id        INTEGER NOT NULL,
+            local_rel_path TEXT NOT NULL,
+            sha256_hex     TEXT NOT NULL,
+            size           INTEGER NOT NULL DEFAULT 0,
+            mime           TEXT,
+            created_at     TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+            PRIMARY KEY (note_id, local_rel_path),
+            FOREIGN KEY (note_id) REFERENCES notes(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_note_attachments_hash
+            ON note_attachments(sha256_hex);
+
+        CREATE INDEX IF NOT EXISTS idx_note_attachments_note
+            ON note_attachments(note_id);",
+    )?;
+
+    set_version(conn, 37)?;
     Ok(())
 }
