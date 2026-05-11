@@ -231,25 +231,24 @@ src-tauri/gen/android/app/build/outputs/
 
 装机：`adb install -r src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`
 
-### Android 签名（release 上架前必做）
+### Android 签名 — 本项目已配好（T-M019 一期）
 
-debug APK 用 Android SDK 自带的 debug keystore 自动签名，**装机可以但不能上架**。release 需要自己的 keystore：
+debug APK 用 Android SDK 自带的 debug keystore 自动签名（同一台机器固定，但 CI runner 的 debug keystore 跟本地不一样，debug→debug 跨机器更新会签名不匹配）。release 用本项目自己的 keystore：
+
+- **keystore**：`src-tauri/gen/android/kb-release.jks`（alias `kb`，RSA 2048，有效期到 2053；**已 .gitignore**，密码见 `key.properties` / 维护者密码管理器 / memory `project_android_keystore.md`）
+- **配置**：`src-tauri/gen/android/key.properties`（也 .gitignore）→ `app/build.gradle.kts` 的 `signingConfigs.release` 读它：
+  - `key.properties` 存在 → `pnpm tauri android build --apk/--aab` 自动用 `kb-release.jks` 签名
+  - 不存在（如别人 fresh clone）→ release 不签名（仅 `assembleRelease` 不报错），debug 不受影响
+- **CI 上**：把 `.jks`（base64）+ storePassword/keyPassword/keyAlias 放 GitHub Secrets，CI 解码还原 `key.properties` 后再 build（T-M019 二期待做）
 
 ```bash
-# 1. 生成 keystore（一次性，妥善保管，丢了无法更新已上架应用）
-keytool -genkey -v -keystore kb-release.jks -keyalg RSA -keysize 2048 \
-  -validity 10000 -alias kb
-
-# 2. 在 src-tauri/gen/android/ 下建 key.properties（已 .gitignore，不要提交）
-cat > src-tauri/gen/android/key.properties <<'EOF'
-storeFile=../../kb-release.jks
-storePassword=<store密码>
-keyAlias=kb
-keyPassword=<key密码>
-EOF
+# 验签：看 release 变体用的是不是 kb-release.jks
+cd src-tauri/gen/android && ./gradlew :app:signingReport | grep -A4 Release
 ```
 
-`src-tauri/gen/android/app/build.gradle.kts` 里 tauri 已生成 `signingConfigs` 读取 `key.properties` 的模板（如果没有，参考 Tauri 文档手动加 `release { signingConfig = signingConfigs.getByName("release") }`）。然后 `pnpm tauri android build --aab` 即生成已签名 AAB。
+> 🔴 **更新签名一致性铁律**：第一个分发给用户的 release APK 用了 `kb-release.jks` → 此后所有版本必须用同一个 keystore，否则用户"检查更新→下载新 APK"会因签名不匹配装不上（`INSTALL_FAILED_UPDATE_INCOMPATIBLE`，只能卸载重装丢数据）。keystore 丢了 = 永远无法给已安装用户推更新。`.jks` + 两个密码务必备份（云盘 + 密码管理器）。
+>
+> 现在手机上装的是「本地 debug APK」，将来换成 release APK 时，老用户需先卸载再装（debug↔release 签名不同）；之后 release→release 才一致。
 
 ### AndroidManifest 权限（与 capabilities 是两套）
 

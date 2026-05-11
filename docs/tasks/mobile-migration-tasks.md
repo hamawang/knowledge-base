@@ -358,13 +358,15 @@
 
 #### T-M019 · Android 签名 + APK / AAB 打包
 
-- **状态**：`pending`
+- **状态**：`in_progress`（本地签名链路已通；CI 接入 + AAB 上架待做）
 - **价值**：⭐⭐⭐⭐⭐  成本：中
 - **子任务**：
-  - [ ] 生成 Android keystore（`keytool -genkey`）
-  - [ ] keystore 存 GitHub Secrets
+  - [x] 生成 Android keystore（`keytool -genkeypair`）→ `src-tauri/gen/android/kb-release.jks`（alias `kb`，RSA 2048，有效期到 2053-09-26）。**已 .gitignore，密码在本地 `key.properties` + 维护者密码管理器**
+  - [x] `key.properties`（`src-tauri/gen/android/key.properties`，.gitignore）+ `app/build.gradle.kts` 接入 `signingConfigs.release`（key.properties 存在则 release APK/AAB 自动用此 keystore 签名，确保更新签名一致；不存在则 release 不签名、debug 不受影响）
+  - [ ] keystore + 密码存 GitHub Secrets（base64 编码 .jks 内容 + storePassword/keyPassword/keyAlias），CI 解码后还原 key.properties
   - [ ] CI 跑 `tauri android build --aab` 出 Google Play 上架包
-  - [ ] 自签 APK 同时输出，方便用户直接侧载
+  - [ ] 自签 release APK 同时输出 + 上传 release 仓库（配合移动端"检查更新"的 APK 直链）
+  - **⚠️ 关键约束**：第一个分发给用户的 release APK 用了 `kb-release.jks` → 此后所有版本都必须用同一个 keystore，否则用户的"检查更新→下载新 APK"会因签名不匹配装不上（`INSTALL_FAILED_UPDATE_INCOMPATIBLE`）。keystore 丢了 = 再也无法给已安装用户推更新。务必备份 `.jks` + 两个密码。
 
 #### T-M020 · CI 扩展：`release.yml` 加 Android / iOS job
 
@@ -376,6 +378,17 @@
   - [ ] 桌面端 4 个 job 不动，确保不破坏现有发布流程
   - [ ] tag `v*-mobile.*.*` 触发移动端 CI（与桌面 tag 区分）
 
+#### T-M021 · 移动端"检查更新"（自更新引导）
+
+- **状态**：`in_progress`（前后端已实现；待 update.json 加 android 字段 + CI 上传 release APK）
+- **价值**：⭐⭐⭐⭐  成本：低
+- **背景**：`tauri-plugin-updater` 不支持移动端（且本项目已 `#[cfg(desktop)]` 隔离），移动端没法原地热替换，只能"检查→引导用户去下载新 APK"
+- **子任务**：
+  - [x] Rust：`commands/mobile_update.rs`（`#[cfg(mobile)]`）`check_mobile_update` —— 拉 `update.json`（与桌面 updater 同 3 个 endpoint）比对版本，返回 `{has_update, current/latest_version, notes, download_url}`；`download_url` 优先 `platforms.android-arm64.url`，没有则回落 release 发布页
+  - [x] 前端：`MobileMe` 加「检查更新」入口 → 有新版弹 Modal（版本 + 更新说明 + 去下载）→ `openUrl(download_url)` 浏览器接管下载，下完点一下进系统安装器（首次系统问"允许安装未知应用"，那是浏览器的权限，本 App 不需要 `REQUEST_INSTALL_PACKAGES`）
+  - [ ] release 仓库的 `update.json` 加 `platforms.android-arm64.url`（指向 release APK 直链）—— 依赖 T-M019 CI + T-M020
+  - [ ] CI（T-M020）出 release APK 后上传到 release 仓库，文件名约定 `knowledge-base_<version>_android-arm64.apk`
+
 ---
 
 ## 阶段进度看板
@@ -386,8 +399,8 @@
 | Phase 1 探针 | 5 | 4 | `in_progress` (T-M001~T-M004 ✅，T-M005 iOS 阻塞) |
 | Phase 2 移植绿区 | 6 | 4 | `in_progress` (T-M006/008/009/010 ✅，T-M007/011 待) |
 | Phase 3 黄区适配 | 4 | 3 | `in_progress` (T-M013/014 一期 + T-M015 全部 ✅，T-M012 PDFium 待) |
-| Phase 4 平台特化 | 5 | 0 | `pending` |
-| **合计** | **21** | **12** | — |
+| Phase 4 平台特化 | 6 | 0 | `in_progress` (T-M019 本地签名链路 ✅ / T-M020 android.yml debug APK ✅ / T-M021 前后端 ✅；CI release 接入、iOS、Intent 待) |
+| **合计** | **22** | **12** | — |
 
 ---
 
