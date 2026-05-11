@@ -9,7 +9,21 @@ import {
   App as AntdApp,
   theme as antdTheme,
 } from "antd";
-import { Plus, Trash2, Edit3, Check, X } from "lucide-react";
+import { Plus, Trash2, Edit3, Check, X, GripVertical } from "lucide-react";
+import {
+  DndContext,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  useSortable,
+  arrayMove,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import { taskCategoryApi } from "@/lib/api";
 import type { TaskCategory } from "@/types";
 
@@ -46,6 +60,165 @@ function toHex(value: unknown): string {
     if (typeof fn === "function") return fn.call(value);
   }
   return "#1677ff";
+}
+
+/**
+ * 单条分类的可拖拽列表项。
+ *
+ * 设计要点：
+ *   1. 拖动手柄独占：把 useSortable 的 listeners 只绑到左侧 GripVertical 图标，
+ *      不绑到整行 —— 否则点编辑/删除按钮、点输入框（编辑态）都会触发拖拽。
+ *   2. PointerSensor 在父级设了 5px 距离阈值，小幅 click 不会误激活拖拽。
+ *   3. transform/transition 来自 dnd-kit，按 vertical 策略平移其他兄弟节点。
+ */
+interface SortableCategoryItemProps {
+  category: TaskCategory;
+  isEditing: boolean;
+  editName: string;
+  editColor: string;
+  onStartEdit: () => void;
+  onCancelEdit: () => void;
+  onSaveEdit: () => void;
+  onEditNameChange: (v: string) => void;
+  onEditColorChange: (v: string) => void;
+  onDelete: () => void;
+  tokenColorText: string;
+  tokenColorTextTertiary: string;
+}
+
+function SortableCategoryItem({
+  category: c,
+  isEditing,
+  editName,
+  editColor,
+  onStartEdit,
+  onCancelEdit,
+  onSaveEdit,
+  onEditNameChange,
+  onEditColorChange,
+  onDelete,
+  tokenColorText,
+  tokenColorTextTertiary,
+}: SortableCategoryItemProps) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+    useSortable({ id: c.id });
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    ...(isDragging
+      ? { position: "relative" as const, zIndex: 999, opacity: 0.7 }
+      : {}),
+  };
+
+  return (
+    <div ref={setNodeRef} style={style}>
+      <List.Item
+        style={{ padding: "8px 4px" }}
+        actions={
+          isEditing
+            ? [
+                <Button
+                  key="save"
+                  type="text"
+                  size="small"
+                  icon={<Check size={14} />}
+                  onClick={onSaveEdit}
+                  title="保存"
+                />,
+                <Button
+                  key="cancel"
+                  type="text"
+                  size="small"
+                  icon={<X size={14} />}
+                  onClick={onCancelEdit}
+                  title="取消"
+                />,
+              ]
+            : [
+                <Button
+                  key="edit"
+                  type="text"
+                  size="small"
+                  icon={<Edit3 size={14} />}
+                  onClick={onStartEdit}
+                  title="编辑"
+                />,
+                <Popconfirm
+                  key="del"
+                  title="删除这个分类？"
+                  description="原任务的分类会被清空（落到「未分类」），不会丢失"
+                  okText="删除"
+                  cancelText="取消"
+                  okButtonProps={{ danger: true }}
+                  onConfirm={onDelete}
+                >
+                  <Button
+                    type="text"
+                    size="small"
+                    icon={<Trash2 size={14} />}
+                    danger
+                    title="删除"
+                  />
+                </Popconfirm>,
+              ]
+        }
+      >
+        <div className="flex items-center gap-2 flex-1 min-w-0">
+          {/* 拖动手柄：仅这里挂 dnd-kit 的 listeners，避免和按钮/输入框冲突。
+              编辑态隐藏手柄，提示用户先保存/取消才能继续重排。 */}
+          {!isEditing && (
+            <span
+              {...attributes}
+              {...listeners}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                cursor: "grab",
+                color: tokenColorTextTertiary,
+                touchAction: "none",
+              }}
+              title="拖动以重排"
+            >
+              <GripVertical size={14} />
+            </span>
+          )}
+          {isEditing ? (
+            <>
+              <ColorPicker
+                value={editColor}
+                onChange={(v) => onEditColorChange(toHex(v))}
+                presets={[{ label: "推荐", colors: PRESET_COLORS }]}
+                size="small"
+              />
+              <Input
+                size="small"
+                value={editName}
+                onChange={(e) => onEditNameChange(e.target.value)}
+                onPressEnter={onSaveEdit}
+                maxLength={30}
+                autoFocus
+                style={{ flex: 1 }}
+              />
+            </>
+          ) : (
+            <>
+              <span
+                style={{
+                  display: "inline-block",
+                  width: 12,
+                  height: 12,
+                  borderRadius: 999,
+                  background: c.color,
+                  flexShrink: 0,
+                }}
+              />
+              <span style={{ fontSize: 13, color: tokenColorText }}>{c.name}</span>
+            </>
+          )}
+        </div>
+      </List.Item>
+    </div>
+  );
 }
 
 export function TaskCategoryManageModal({ open, onClose, onChanged }: Props) {
@@ -158,6 +331,41 @@ export function TaskCategoryManageModal({ open, onClose, onChanged }: Props) {
     }
   }
 
+  // PointerSensor 设 5px 激活距离：避免在拖动手柄上的微点击误触发拖拽
+  const dndSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+  );
+
+  /** 拖完后把当前数组顺序 broadcast 到 sort_order：
+   *  1. 乐观更新本地 state，UI 立刻反映新顺序
+   *  2. 并行调多个 update_task_category 写后端 sort_order（分类条数极少，并行成本可忽略）
+   *  3. 任一失败 → 提示 + reload 兜底回滚
+   *  不新增 batch reorder API，复用现有 update Command，零后端改动 */
+  async function handleDragEnd(event: DragEndEvent) {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    const oldIdx = categories.findIndex((c) => c.id === active.id);
+    const newIdx = categories.findIndex((c) => c.id === over.id);
+    if (oldIdx < 0 || newIdx < 0) return;
+
+    const reordered = arrayMove(categories, oldIdx, newIdx);
+    setCategories(reordered); // 乐观更新
+
+    try {
+      await Promise.all(
+        reordered.map((c, idx) =>
+          c.sort_order === idx
+            ? Promise.resolve(true)
+            : taskCategoryApi.update(c.id, { sort_order: idx }),
+        ),
+      );
+      onChanged?.();
+    } catch (e) {
+      message.error(`排序保存失败：${e}`);
+      await load(); // 回滚到服务端真实顺序
+    }
+  }
+
   return (
     <Modal
       title="管理待办分类"
@@ -214,106 +422,36 @@ export function TaskCategoryManageModal({ open, onClose, onChanged }: Props) {
           )}
         </div>
 
-        {/* 列表 */}
-        <List
-          loading={loading}
-          dataSource={categories}
-          locale={{ emptyText: "还没有分类，使用上方输入框创建第一个" }}
-          renderItem={(c) => {
-            const isEditing = editingId === c.id;
-            return (
-              <List.Item
-                style={{ padding: "8px 4px" }}
-                actions={
-                  isEditing
-                    ? [
-                        <Button
-                          key="save"
-                          type="text"
-                          size="small"
-                          icon={<Check size={14} />}
-                          onClick={() => saveEdit(c.id)}
-                          title="保存"
-                        />,
-                        <Button
-                          key="cancel"
-                          type="text"
-                          size="small"
-                          icon={<X size={14} />}
-                          onClick={cancelEdit}
-                          title="取消"
-                        />,
-                      ]
-                    : [
-                        <Button
-                          key="edit"
-                          type="text"
-                          size="small"
-                          icon={<Edit3 size={14} />}
-                          onClick={() => startEdit(c)}
-                          title="编辑"
-                        />,
-                        <Popconfirm
-                          key="del"
-                          title="删除这个分类？"
-                          description="原任务的分类会被清空（落到「未分类」），不会丢失"
-                          okText="删除"
-                          cancelText="取消"
-                          okButtonProps={{ danger: true }}
-                          onConfirm={() => handleDelete(c.id)}
-                        >
-                          <Button
-                            type="text"
-                            size="small"
-                            icon={<Trash2 size={14} />}
-                            danger
-                            title="删除"
-                          />
-                        </Popconfirm>,
-                      ]
-                }
-              >
-                <div className="flex items-center gap-2 flex-1 min-w-0">
-                  {isEditing ? (
-                    <>
-                      <ColorPicker
-                        value={editColor}
-                        onChange={(v) => setEditColor(toHex(v))}
-                        presets={[{ label: "推荐", colors: PRESET_COLORS }]}
-                        size="small"
-                      />
-                      <Input
-                        size="small"
-                        value={editName}
-                        onChange={(e) => setEditName(e.target.value)}
-                        onPressEnter={() => saveEdit(c.id)}
-                        maxLength={30}
-                        autoFocus
-                        style={{ flex: 1 }}
-                      />
-                    </>
-                  ) : (
-                    <>
-                      <span
-                        style={{
-                          display: "inline-block",
-                          width: 12,
-                          height: 12,
-                          borderRadius: 999,
-                          background: c.color,
-                          flexShrink: 0,
-                        }}
-                      />
-                      <span style={{ fontSize: 13, color: token.colorText }}>
-                        {c.name}
-                      </span>
-                    </>
-                  )}
-                </div>
-              </List.Item>
-            );
-          }}
-        />
+        {/* 列表（可拖拽重排） */}
+        <DndContext sensors={dndSensors} onDragEnd={handleDragEnd}>
+          <SortableContext
+            items={categories.map((c) => c.id)}
+            strategy={verticalListSortingStrategy}
+          >
+            <List
+              loading={loading}
+              dataSource={categories}
+              locale={{ emptyText: "还没有分类，使用上方输入框创建第一个" }}
+              renderItem={(c) => (
+                <SortableCategoryItem
+                  key={c.id}
+                  category={c}
+                  isEditing={editingId === c.id}
+                  editName={editName}
+                  editColor={editColor}
+                  onStartEdit={() => startEdit(c)}
+                  onCancelEdit={cancelEdit}
+                  onSaveEdit={() => saveEdit(c.id)}
+                  onEditNameChange={setEditName}
+                  onEditColorChange={setEditColor}
+                  onDelete={() => handleDelete(c.id)}
+                  tokenColorText={token.colorText}
+                  tokenColorTextTertiary={token.colorTextTertiary}
+                />
+              )}
+            />
+          </SortableContext>
+        </DndContext>
       </div>
     </Modal>
   );
