@@ -1280,8 +1280,13 @@ impl AiService {
     /// 2. 流式解析多维护一个 tool_calls 累加器
     /// 3. RAG 被替换为工具（AI 自己调 search_notes）
     ///
-    /// 仅支持 OpenAI 兼容协议族（openai / claude / deepseek / zhipu）。
-    /// Ollama 先不支持——各模型对 function calling streaming 支持差异大，放 v2 再补。
+    /// 支持两族协议：
+    /// - OpenAI 兼容（openai / claude / deepseek / zhipu / lmstudio / 自定义）：走 `stream_openai_with_tools`
+    /// - Ollama：走 `stream_ollama_with_tools`（Ollama 0.3+ 原生支持 OpenAI 风格 tools 数组，
+    ///   但流协议是 NDJSON、tool_calls 一次性返回；需要单独的解析路径）
+    ///
+    /// Ollama 侧前提：模型本身具备 function calling 能力（qwen2.5 / llama3.1 / mistral-nemo 等）；
+    /// 纯文本模型如 gemma2 / phi3 即使协议层通过也不会返回 tool_calls。
     pub async fn chat_stream_with_skills(
         app: AppHandle,
         db: &Database,
@@ -1306,15 +1311,7 @@ impl AiService {
             model_id
         };
         let model = db.get_ai_model(conv_model_id)?;
-
-        // T-012: Skills 仅在非 ollama 时启用；其他 provider 都按 OpenAI 兼容协议处理
-        // （含 LM Studio / 自定义 baseUrl —— 用户得自己保证模型支持 tool_calls）
-        if model.provider == "ollama" {
-            return Err(AppError::Custom(
-                "Skills 功能暂不支持 Ollama 协议，请切换到 OpenAI 兼容模型（含本地 LM Studio）。"
-                    .into(),
-            ));
-        }
+        let is_ollama = model.provider == "ollama";
 
         // 2. 保存用户消息
         let user_msg = db.add_ai_message(conversation_id, "user", user_message, None)?;
@@ -1384,14 +1381,26 @@ impl AiService {
                 std::borrow::Cow::Owned(m)
             };
 
-            let (content, tool_calls) = Self::stream_openai_with_tools(
-                &app,
-                &model,
-                req_messages.as_ref(),
-                if allow_tools { &tool_schemas } else { &[] },
-                cancel_rx.clone(),
-            )
-            .await;
+            let tools_arg: &[Value] = if allow_tools { &tool_schemas } else { &[] };
+            let (content, tool_calls) = if is_ollama {
+                Self::stream_ollama_with_tools(
+                    &app,
+                    &model,
+                    req_messages.as_ref(),
+                    tools_arg,
+                    cancel_rx.clone(),
+                )
+                .await
+            } else {
+                Self::stream_openai_with_tools(
+                    &app,
+                    &model,
+                    req_messages.as_ref(),
+                    tools_arg,
+                    cancel_rx.clone(),
+                )
+                .await
+            };
 
             let (content, mut tool_calls) = match content {
                 Ok(c) => (c, tool_calls.unwrap_or_default()),
@@ -1669,6 +1678,111 @@ impl AiService {
 
         (Ok(content), Some(tool_calls))
     }
+
+    /// Ollama `/api/chat` 流式请求 + tool_calls 支持
+    ///
+    /// 与 OpenAI 版本的协议差异：
+    /// - 流格式：NDJSON（一行一个完整 JSON 对象），不是 SSE 的 `data: {...}`
+    /// - tool_calls 字段：Ollama 在 `done` 那一行一次性返回**完整**数组（arguments 是 JSON object，
+    ///   不是 string），无 `index`、无 `id`。OpenAI 则是分片 delta，arguments 是字符串拼接。
+    /// - tool_choice：Ollama 不支持，模型自决；OpenAI 用 `"tool_choice": "auto"`
+    ///
+    /// 为复用外层调度，把 Ollama 的 arguments object 序列化成 string 塞进 `ToolCallAccum.args_json`，
+    /// id 留空让外层 `chat_stream_with_skills` 兜底合成 `call_auto_X_Y`。
+    ///
+    /// 前提：模型本身要支持 function calling（qwen2.5 / llama3.1 / mistral-nemo 等；
+    /// gemma2 / phi3 不支持）。Ollama 服务版本需 ≥ 0.3。
+    async fn stream_ollama_with_tools(
+        app: &AppHandle,
+        model: &AiModel,
+        messages: &[Value],
+        tools: &[Value],
+        mut cancel_rx: watch::Receiver<bool>,
+    ) -> (Result<String, AppError>, Option<Vec<ToolCallAccum>>) {
+        let url = format!("{}/api/chat", model.api_url.trim_end_matches('/'));
+        let client = build_ollama_client();
+
+        let mut request_body = json!({
+            "model": model.model_id,
+            "messages": messages,
+            "stream": true,
+        });
+        if !tools.is_empty() {
+            request_body["tools"] = json!(tools);
+        }
+
+        let response = match client.post(&url).json(&request_body).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                return (
+                    Err(AppError::Custom(format_ollama_send_error(&e, &url))),
+                    None,
+                );
+            }
+        };
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return (
+                Err(AppError::Custom(format!(
+                    "Ollama 返回错误 {}: {}",
+                    status, body
+                ))),
+                None,
+            );
+        }
+
+        let mut stream = response.bytes_stream();
+        let mut content = String::new();
+        // Ollama 通常在 done 行一次给完整 tool_calls 数组，但留个累积容器
+        // （某些版本可能跨多帧；后到的覆盖前到的，按出现顺序编 index）
+        let mut tool_calls_final: Vec<ToolCallAccum> = Vec::new();
+        // UTF-8 chunk 切分 + NDJSON 按 \n 切（同 OpenAI 的处理逻辑）
+        let mut buffer: Vec<u8> = Vec::new();
+
+        loop {
+            tokio::select! {
+                chunk = stream.next() => {
+                    match chunk {
+                        Some(Ok(bytes)) => {
+                            buffer.extend_from_slice(&bytes);
+                            while let Some(pos) = buffer.iter().position(|b| *b == b'\n') {
+                                let line_bytes: Vec<u8> = buffer.drain(..=pos).collect();
+                                let line = String::from_utf8_lossy(&line_bytes);
+                                let line = line.trim_end_matches(&['\r', '\n'][..]);
+                                handle_ollama_stream_line(
+                                    app,
+                                    line,
+                                    &mut content,
+                                    &mut tool_calls_final,
+                                );
+                            }
+                        }
+                        Some(Err(e)) => {
+                            let _ = app.emit("ai:error", e.to_string());
+                            return (Err(AppError::Custom(format!("流读取错误: {}", e))), None);
+                        }
+                        None => break,
+                    }
+                }
+                _ = cancel_rx.changed() => {
+                    if *cancel_rx.borrow() {
+                        let _ = app.emit("ai:done", "cancelled");
+                        return (Ok(content), Some(Vec::new()));
+                    }
+                }
+            }
+        }
+
+        // 末尾未以 \n 结尾的 leftover（Ollama 一般会用 \n 结束，但保险一下）
+        if !buffer.is_empty() {
+            let line = String::from_utf8_lossy(&buffer);
+            let line = line.trim_end_matches(&['\r', '\n'][..]);
+            handle_ollama_stream_line(app, line, &mut content, &mut tool_calls_final);
+        }
+
+        (Ok(content), Some(tool_calls_final))
+    }
 }
 
 /// 解析单行 OpenAI SSE 流数据，累加内容并更新 tool_calls 状态。
@@ -1738,6 +1852,60 @@ struct ToolCallAccum {
     name: String,
     /// 累加后的 arguments JSON 字符串（尚未解析）
     args_json: String,
+}
+
+/// 解析单行 Ollama NDJSON 流数据，累加 content 并提取 tool_calls。
+///
+/// Ollama 协议：每行一个 JSON `{message:{content,tool_calls?}, done}`。
+/// 与 OpenAI delta 的两个关键差异：
+/// 1. tool_calls 通常在 `done:true` 的一行整体返回（不分片）
+/// 2. arguments 是 JSON object 而非 string —— 这里序列化成字符串塞进 `ToolCallAccum.args_json`
+///    以便和 OpenAI 分支共用外层 dispatch 逻辑（skills::dispatch_with_mcp 接收 &str）
+fn handle_ollama_stream_line(
+    app: &AppHandle,
+    line: &str,
+    content: &mut String,
+    tool_calls_final: &mut Vec<ToolCallAccum>,
+) {
+    if line.is_empty() {
+        return;
+    }
+    let data: Value = match serde_json::from_str(line) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    if let Some(c) = data["message"]["content"].as_str() {
+        if !c.is_empty() {
+            content.push_str(c);
+            let _ = app.emit("ai:token", c);
+        }
+    }
+
+    // 后到的 tool_calls 数组覆盖前一次（Ollama 几乎总是一次性给完整数组）。
+    // 用 clear+push 而非追加，避免同一组调用被复制多次造成"重复执行"。
+    if let Some(tcs) = data["message"]["tool_calls"].as_array() {
+        if !tcs.is_empty() {
+            tool_calls_final.clear();
+            for tc in tcs {
+                let name = tc["function"]["name"].as_str().unwrap_or("").to_string();
+                if name.is_empty() {
+                    continue;
+                }
+                // Ollama 返回 object，序列化成 string；同时兼容个别版本已返回 string 的情况
+                let args_json = match &tc["function"]["arguments"] {
+                    Value::String(s) => s.clone(),
+                    other => serde_json::to_string(other).unwrap_or_else(|_| "{}".into()),
+                };
+                tool_calls_final.push(ToolCallAccum {
+                    // id 留空，外层 chat_stream_with_skills 兜底为 call_auto_X_Y
+                    id: tc["id"].as_str().unwrap_or("").to_string(),
+                    name,
+                    args_json,
+                });
+            }
+        }
+    }
 }
 
 impl AiService {
