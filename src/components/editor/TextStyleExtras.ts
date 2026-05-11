@@ -226,6 +226,39 @@ export const Indent = Extension.create({
 });
 
 /**
+ * 判断一个 paragraph 节点是否"实际为空"——视觉上对应一个空白行。
+ *
+ * 覆盖三种情况：
+ *   1. content.size === 0：用户刚按 Enter 留出的全新空段落
+ *   2. 仅含 hardBreak：上次保存为 <p><br></p>，DOMParser 解析回 paragraph + hardBreak
+ *   3. 仅含纯空白文本（含 hardBreak / 空格 / 全角空格 / 零宽字符等）：极端兜底
+ *
+ * 不包括含任何可见字符的段落，避免误把"刚开始打字的段落"也包成 HTML 块。
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function isEffectivelyEmpty(node: any): boolean {
+  if (node.content.size === 0) return true;
+  // 仅一个 hardBreak（最常见的 round-trip 形态）
+  if (
+    node.content.childCount === 1 &&
+    node.content.firstChild?.type?.name === "hardBreak"
+  ) {
+    return true;
+  }
+  // 兜底：textContent 去白后仍为空（含纯空格/换行/零宽字符等）
+  const text: string = (node.textContent ?? "") as string;
+  if (text.replace(/[\s​ ]/g, "") !== "") return false;
+  // 同时确认 content 里只有 text / hardBreak 节点（避免把含图片但 textContent 为空的段落误判）
+  let onlyEmptyInline = true;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  node.content.forEach((child: any) => {
+    const n = child.type?.name;
+    if (n !== "text" && n !== "hardBreak") onlyEmptyInline = false;
+  });
+  return onlyEmptyInline;
+}
+
+/**
  * paragraph / heading 的 markdown 序列化：当节点带"非默认"属性（缩进 indent>0
  * 或对齐 textAlign 非 left）时输出 HTML 块，让 Markdown 文件保留这些可视格式
  * （依赖 `html: true` + 各属性 parseHTML 闭环）；都为默认时退回 prosemirror-markdown
@@ -271,7 +304,13 @@ function makeIndentMarkdownStorage(parentStorage: Record<string, unknown>) {
         // 单个段落分隔符，导致用户按 Enter 留出的视觉空行保存后丢失。改写为
         // <p><br></p> HTML 块（依赖 html: true），markdown-it 原样保留 HTML 块，
         // 重读时解析回带 hardBreak 的段落，视觉空行被保留。
-        if (name === "paragraph" && node.content.size === 0 && htmlAllowed) {
+        //
+        // R-004 round-trip：第一次保存 size===0 走这条分支输出 <p><br></p>，但 ProseMirror
+        // 的 DOMParser 把 <p><br></p> 解析回 paragraph + hardBreak（content.size===1）。
+        // 第二次保存时如果只检查 size===0 会错过这种"实际为空"的段落 → 退回普通空行 →
+        // markdown-it 又折叠 → 第二次保存丢空行。修复：把判定放宽到"内容仅含 hardBreak
+        // 或仅含空白文本"的情况。
+        if (name === "paragraph" && htmlAllowed && isEffectivelyEmpty(node)) {
           state.write("<p><br></p>");
           state.closeBlock(node);
           return;
