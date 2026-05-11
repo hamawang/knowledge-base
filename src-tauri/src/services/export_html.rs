@@ -21,13 +21,17 @@ pub struct HtmlExportResult {
 pub struct HtmlExportService;
 
 impl HtmlExportService {
-    /// 导出单条笔记为单文件 HTML（图片内嵌 base64，可独立分享）
-    pub fn export_single(
+    /// 渲染笔记为单文件 HTML 字符串（图片内嵌 base64，可独立分享）。
+    ///
+    /// 与 `export_single` 的区别：不写文件，直接返回 HTML 字符串。
+    /// 用于 R-005 PDF 导出场景：前端拿字符串塞 iframe → window.print() → 用户另存为 PDF。
+    ///
+    /// 返回 `(html_string, images_inlined, images_missing)`。
+    pub fn render_html(
         title: &str,
         markdown: &str,
-        target_path: &Path,
         assets_root: &Path,
-    ) -> Result<HtmlExportResult, AppError> {
+    ) -> Result<(String, usize, usize), AppError> {
         let mut options = Options::empty();
         options.insert(Options::ENABLE_TABLES);
         options.insert(Options::ENABLE_STRIKETHROUGH);
@@ -42,6 +46,17 @@ impl HtmlExportService {
         let (body, inlined, missing) = inline_images(&body, assets_root);
 
         let html = wrap_template(title, &body);
+        Ok((html, inlined, missing))
+    }
+
+    /// 导出单条笔记为单文件 HTML（图片内嵌 base64，可独立分享）
+    pub fn export_single(
+        title: &str,
+        markdown: &str,
+        target_path: &Path,
+        assets_root: &Path,
+    ) -> Result<HtmlExportResult, AppError> {
+        let (html, inlined, missing) = Self::render_html(title, markdown, assets_root)?;
         std::fs::write(target_path, html)?;
 
         Ok(HtmlExportResult {

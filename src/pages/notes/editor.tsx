@@ -25,6 +25,7 @@ import { CloseCircleFilled } from "@ant-design/icons";
 import { useAppStore } from "@/store";
 import { useTabsStore } from "@/store/tabs";
 import { noteApi, tagApi, folderApi, linkApi, exportApi, sourceFileApi, vaultApi, sourceWritebackApi } from "@/lib/api";
+import { printHtmlAsPdf } from "@/lib/exportPdf";
 import { VaultModal } from "@/components/vault/VaultModal";
 import { open as openDialog, save } from "@tauri-apps/plugin-dialog";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -1175,6 +1176,22 @@ function DesktopNoteEditorPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // R-006 Ctrl+Alt+E / Cmd+Alt+E 直接导出当前笔记为 Markdown（与 Shift+E 打开菜单区分）
+  // 用 ref 避开闭包陷阱：onKey 在 useEffect 闭包内捕获了挂载时的 handleExportNote，
+  // 但 handleExportNote 引用的 noteId / title 在每次渲染都是新的 → 直接捕获会用旧值
+  const exportNoteRef = useRef<typeof handleExportNote>(handleExportNote);
+  exportNoteRef.current = handleExportNote;
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if ((e.ctrlKey || e.metaKey) && e.altKey && !e.shiftKey && e.key.toLowerCase() === "e") {
+        e.preventDefault();
+        void exportNoteRef.current();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   async function handleDelete() {
     try {
       await noteApi.delete(noteId);
@@ -1472,6 +1489,23 @@ function DesktopNoteEditorPage() {
       });
     } catch (e) {
       message.error(`导出 HTML 失败: ${e}`);
+    }
+  }
+
+  /** R-005 导出为 PDF — 复用 HTML 导出渲染管线，前端 iframe 触发系统打印对话框，
+   *  用户在对话框选 "Microsoft Print to PDF" / "另存为 PDF" 完成保存。 */
+  async function handleExportPdf() {
+    const hide = message.loading("正在准备 PDF 打印…", 0);
+    try {
+      const html = await exportApi.renderHtmlForPdf(noteId);
+      hide();
+      // 提示用户打印对话框流程，避免误以为应用卡住
+      message.info("请在打印对话框中选择「另存为 PDF」", 3);
+      const safeName = title.replace(/[/\\:*?"<>|]/g, "_").trim() || "未命名";
+      await printHtmlAsPdf(html, safeName);
+    } catch (e) {
+      hide();
+      message.error(`导出 PDF 失败: ${e}`);
     }
   }
 
@@ -1814,6 +1848,11 @@ function DesktopNoteEditorPage() {
                         key: "html",
                         label: "导出为 HTML (单文件)",
                         onClick: () => void handleExportHtml(),
+                      },
+                      {
+                        key: "pdf",
+                        label: "导出为 PDF (打印)",
+                        onClick: () => void handleExportPdf(),
                       },
                     ],
                   }}

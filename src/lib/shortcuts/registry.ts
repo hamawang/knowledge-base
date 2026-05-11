@@ -96,6 +96,7 @@ export const SHORTCUTS: ShortcutDef[] = [
   { id: "editor.find", scope: "editor", defaultAccel: "CommandOrControl+F", group: "编辑器 - 操作", desc: "查找" },
   { id: "editor.replace", scope: "editor", defaultAccel: "CommandOrControl+H", group: "编辑器 - 操作", desc: "查找并替换" },
   { id: "editor.exportMenu", scope: "editor", defaultAccel: "CommandOrControl+Shift+E", group: "编辑器 - 操作", desc: "打开导出菜单（Markdown / Word / HTML）" },
+  { id: "editor.exportCurrentMarkdown", scope: "editor", defaultAccel: "CommandOrControl+Alt+E", group: "编辑器 - 操作", desc: "直接导出当前笔记为 Markdown" },
 ];
 
 const IS_MAC = typeof navigator !== "undefined" && /Mac OS X|Macintosh/.test(navigator.userAgent);

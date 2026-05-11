@@ -101,3 +101,34 @@ pub fn export_single_note_to_html(
     )
     .map_err(|e| e.to_string())
 }
+
+/// R-005 渲染笔记为 HTML 字符串供前端 iframe 打印为 PDF。
+///
+/// 不写文件，前端拿到字符串后塞 hidden iframe → contentWindow.print() →
+/// 用户在原生打印对话框选 "Microsoft Print to PDF" / "另存为 PDF"。
+///
+/// 返回的 HTML 与 export_single_note_to_html 一致：图片内嵌 base64，
+/// 自包含可独立打印，无需额外资源加载。
+#[tauri::command]
+pub fn render_note_html_for_pdf(
+    state: tauri::State<'_, AppState>,
+    id: i64,
+) -> Result<String, String> {
+    let note = state
+        .db
+        .get_note(id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("笔记 {} 不存在", id))?;
+
+    let assets_root = state.data_dir.clone();
+
+    let (html, _inlined, _missing) =
+        services::export_html::HtmlExportService::render_html(
+            &note.title,
+            &note.content,
+            &assets_root,
+        )
+        .map_err(|e| e.to_string())?;
+
+    Ok(html)
+}
