@@ -4,7 +4,7 @@
  */
 
 /** 主题模式 */
-export type ThemeMode = "light-glass" | "light-warm" | "dark-starry" | "dark-mocha";
+export type ThemeMode = "light-glass" | "light-warm" | "light-jade" | "dark-starry" | "dark-mocha";
 
 /** 主题分类 */
 export type ThemeCategory = "light" | "dark";
@@ -40,6 +40,13 @@ export const themes: ThemeMeta[] = [
     colors: ["#faf8f5", "#c2713a", "#6b8e5e", "#e6a849"],
   },
   {
+    key: "light-jade",
+    label: "翡翠白瓷",
+    category: "light",
+    description: "三栏浅灰 + 翡翠绿点缀",
+    colors: ["#e2e3ea", "#e3e3e5", "#fafafa", "#07c160"],
+  },
+  {
     key: "dark-starry",
     label: "星空沉浸",
     category: "dark",
@@ -67,6 +74,8 @@ export function getAntdTokens(mode: ThemeMode) {
       return { colorPrimary: "#6366f1", borderRadius: 12 };
     case "light-warm":
       return { colorPrimary: "#c2713a", borderRadius: 8 };
+    case "light-jade":
+      return { colorPrimary: "#07c160", borderRadius: 6 };
     case "dark-starry":
       return { colorPrimary: "#a78bfa", borderRadius: 14 };
     case "dark-mocha":

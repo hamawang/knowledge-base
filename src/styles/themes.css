@@ -202,6 +202,174 @@
   opacity: 1;
 }
 
+/* ─── 亮色 C：翡翠白瓷 ──────────────────────────────────────
+   三栏浅灰配色（参考微信 macOS 新版视觉）：
+     ActivityBar #e2e3ea（最左、最深的浅灰）
+     SidePanel  #e3e3e5（中间栏、稍浅）
+     主区        #fafafa（右侧、几乎白）
+   强调色：翡翠绿 #07c160（活动条选中态 / Primary / 聚焦边框）
+   注意点：
+     - ActivityBar 内联 background=token.colorBgContainer，必须 !important 强覆盖
+     - SidePanel 内联 ${colorBgContainer}80 + blur，要换成实色并关闭 blur
+     - lucide 图标 color 通过 prop 注入 SVG，选择器要打到 .activity-item svg
+   ──────────────────────────────────────────────────────── */
+[data-theme="light-jade"] {
+  --kb-bg-app: #fafafa;
+  --kb-bg-card: #ffffff;
+  --kb-bg-sidebar: #e2e3ea;
+  --kb-bg-panel: #e3e3e5;
+  --kb-bg-header: #fafafa;
+  --kb-bg-content: #fafafa;
+  --kb-bg-hover: rgba(0,0,0,0.04);
+  --kb-bg-active: rgba(7,193,96,0.14);
+  --kb-text-primary: #191919;
+  --kb-text-secondary: #5f5f5f;
+  --kb-text-tertiary: #9c9c9c;
+  --kb-text-icon: #4a4a4a;
+  --kb-text-icon-hover: #1f1f1f;
+  --kb-border: #d8d9dd;
+  --kb-border-card: #e6e7eb;
+  --kb-border-sidebar: #d4d5da;
+  --kb-primary: #07c160;
+  --kb-primary-light: rgba(7,193,96,0.1);
+  --kb-accent: #07c160;
+  --kb-glass-blur: 0px;
+  --kb-shadow-sm: 0 1px 2px rgba(0,0,0,0.04);
+  --kb-shadow-md: 0 2px 8px rgba(0,0,0,0.06);
+  --kb-scrollbar-thumb: rgba(0,0,0,0.18);
+  --kb-scrollbar-hover: rgba(0,0,0,0.32);
+  color-scheme: light;
+}
+
+[data-theme="light-jade"] body,
+[data-theme="light-jade"] #root {
+  background: var(--kb-bg-app) !important;
+}
+
+/* Layout */
+[data-theme="light-jade"] .ant-layout {
+  background: var(--kb-bg-app) !important;
+}
+[data-theme="light-jade"] .ant-layout-sider {
+  background: var(--kb-bg-sidebar) !important;
+  border-right: 1px solid var(--kb-border-sidebar) !important;
+}
+[data-theme="light-jade"] .ant-layout-header {
+  background: var(--kb-bg-header) !important;
+  border-bottom: 1px solid var(--kb-border) !important;
+}
+[data-theme="light-jade"] .ant-layout-content {
+  background: var(--kb-bg-content) !important;
+}
+
+/* ActivityBar — 浅灰容器（覆盖 inline token.colorBgContainer 的纯白） */
+[data-theme="light-jade"] .activity-bar {
+  background: var(--kb-bg-sidebar) !important;
+  border-right-color: var(--kb-border-sidebar) !important;
+}
+
+/* ActivityBar 图标按钮：浅灰底上深色图标
+   button 的 color / background 是 inline，lucide 图标 color 通过 prop 注入 svg，
+   两层都要覆盖才能稳。 */
+[data-theme="light-jade"] .activity-item {
+  color: var(--kb-text-icon) !important;
+  background: transparent !important;
+}
+[data-theme="light-jade"] .activity-item svg {
+  color: var(--kb-text-icon) !important;
+}
+[data-theme="light-jade"] .activity-item:hover:not([data-active]) {
+  color: var(--kb-text-icon-hover) !important;
+  background: rgba(0,0,0,0.05) !important;
+}
+[data-theme="light-jade"] .activity-item:hover:not([data-active]) svg {
+  color: var(--kb-text-icon-hover) !important;
+}
+[data-theme="light-jade"] .activity-item[data-active] {
+  color: var(--kb-primary) !important;
+  background: rgba(7,193,96,0.14) !important;
+}
+[data-theme="light-jade"] .activity-item[data-active] svg {
+  color: var(--kb-primary) !important;
+}
+[data-theme="light-jade"] .activity-item[data-active] span[aria-hidden] {
+  background: var(--kb-primary) !important;
+}
+
+/* SidePanel 浮层 — 中间浅灰栏（覆盖 inline ${colorBgContainer}80 + blur） */
+[data-theme="light-jade"] .side-panel-enter {
+  background: var(--kb-bg-panel) !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  border-right-color: var(--kb-border) !important;
+}
+
+/* Card */
+[data-theme="light-jade"] .ant-card {
+  background: var(--kb-bg-card) !important;
+  border-color: var(--kb-border-card) !important;
+  border-radius: 6px !important;
+  box-shadow: none !important;
+}
+[data-theme="light-jade"] .ant-card:hover {
+  box-shadow: var(--kb-shadow-sm) !important;
+}
+
+/* Menu */
+[data-theme="light-jade"] .ant-menu {
+  background: transparent !important;
+}
+[data-theme="light-jade"] .ant-menu-item-selected {
+  background: var(--kb-bg-active) !important;
+  color: var(--kb-primary) !important;
+}
+[data-theme="light-jade"] .ant-menu-item:hover:not(.ant-menu-item-selected) {
+  background: var(--kb-bg-hover) !important;
+}
+
+/* Input */
+[data-theme="light-jade"] .ant-input,
+[data-theme="light-jade"] .ant-input-affix-wrapper {
+  background: #ffffff !important;
+  border-color: var(--kb-border) !important;
+}
+[data-theme="light-jade"] .ant-input:focus,
+[data-theme="light-jade"] .ant-input-affix-wrapper:focus,
+[data-theme="light-jade"] .ant-input-affix-wrapper-focused {
+  border-color: var(--kb-primary) !important;
+  box-shadow: 0 0 0 2px var(--kb-primary-light) !important;
+}
+
+/* Table */
+[data-theme="light-jade"] .ant-table {
+  background: transparent !important;
+}
+[data-theme="light-jade"] .ant-table-thead > tr > th,
+[data-theme="light-jade"] .ant-table-thead > tr > td {
+  background: #f3f4f6 !important;
+  border-color: var(--kb-border) !important;
+}
+[data-theme="light-jade"] .ant-table-tbody > tr > td {
+  border-color: var(--kb-border) !important;
+}
+[data-theme="light-jade"] .ant-table-tbody > tr:hover > td {
+  background: var(--kb-bg-hover) !important;
+}
+
+/* Button primary 翠绿按钮 */
+[data-theme="light-jade"] .ant-btn-primary {
+  box-shadow: 0 1px 2px rgba(7,193,96,0.18) !important;
+}
+
+/* 编辑器 */
+[data-theme="light-jade"] .editor-topbar {
+  background: var(--kb-bg-panel) !important;
+  border-bottom-color: var(--kb-border) !important;
+}
+[data-theme="light-jade"] .editor-body {
+  background: #ffffff !important;
+}
+
 /* ─── 暗色 A：星空沉浸 ──────────────────────────────────── */
 [data-theme="dark-starry"] {
   --kb-bg-app: #0a0a12;
