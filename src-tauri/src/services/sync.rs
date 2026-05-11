@@ -534,7 +534,96 @@ impl SyncService {
         }
         removed
     }
+
+    // ─── 快照加密（T-S050 端到端加密备份；Part 1 核心层，集成到 push/pull/export 是 Part 2） ──
+
+    /// 用密码加密快照 ZIP 字节。
+    ///
+    /// 输出格式：`[MAGIC 8B][salt 16B][nonce 12B + AES-256-GCM ciphertext + tag]`
+    /// （后段就是 `crypto::aead_encrypt` 的输出 = `nonce ‖ ciphertext+tag`）
+    /// - salt 公开存放在文件里是安全的（Argon2 设计如此）
+    /// - **整块加密**：zip 字节全部进内存（大库 >100MB 注意内存峰值；快照归档通常阶段性手动操作）
+    #[allow(dead_code)] // T-S050 Part 2 集成到 webdav_push / export_to_file 时启用
+    pub fn encrypt_snapshot(zip: &[u8], password: &str) -> Result<Vec<u8>, AppError> {
+        if password.is_empty() {
+            return Err(AppError::Custom("备份密码不能为空".into()));
+        }
+        let salt = crypto::new_salt();
+        let key = crypto::derive_user_key(password, &salt)?;
+        let blob = crypto::aead_encrypt(&key, zip)?; // = nonce(12) ‖ ciphertext+tag
+        let mut out = Vec::with_capacity(SNAPSHOT_MAGIC.len() + salt.len() + blob.len());
+        out.extend_from_slice(SNAPSHOT_MAGIC);
+        out.extend_from_slice(&salt);
+        out.extend_from_slice(&blob);
+        Ok(out)
+    }
+
+    /// 解密快照文件 → ZIP 字节。密码错误 / 文件损坏 / 魔数不匹配 → Err。
+    #[allow(dead_code)] // T-S050 Part 2 集成到 webdav_pull / import_from_file 时启用
+    pub fn decrypt_snapshot(enc: &[u8], password: &str) -> Result<Vec<u8>, AppError> {
+        let min_len = SNAPSHOT_MAGIC.len() + crypto::SALT_LEN + crypto::NONCE_LEN + 16; // +16 GCM tag
+        if enc.len() < min_len {
+            return Err(AppError::Custom("加密快照文件太短或已损坏".into()));
+        }
+        if &enc[..SNAPSHOT_MAGIC.len()] != SNAPSHOT_MAGIC {
+            return Err(AppError::Custom(
+                "不是合法的加密快照（魔数不匹配；可能是明文 ZIP 或损坏文件）".into(),
+            ));
+        }
+        let salt = &enc[SNAPSHOT_MAGIC.len()..SNAPSHOT_MAGIC.len() + crypto::SALT_LEN];
+        let blob = &enc[SNAPSHOT_MAGIC.len() + crypto::SALT_LEN..];
+        let key = crypto::derive_user_key(password, salt)?;
+        crypto::aead_decrypt(&key, blob)
+            .map_err(|_| AppError::Custom("备份密码错误，或文件已损坏".into()))
+    }
+
+    /// 检查字节流是否是加密快照（看魔数头）。明文 ZIP 以 `PK\x03\x04` 开头，不会误判。
+    #[allow(dead_code)] // T-S050 Part 2 集成到 webdav_pull / import_from_file 时启用
+    pub fn is_encrypted_snapshot(bytes: &[u8]) -> bool {
+        bytes.len() >= SNAPSHOT_MAGIC.len() && &bytes[..SNAPSHOT_MAGIC.len()] == SNAPSHOT_MAGIC
+    }
+
+    // ─── 备份密码存取（与 WebDAV 密码同机制：hostname 派生 key + AES-GCM 存 app_config）─────
+
+    #[allow(dead_code)] // T-S050 Part 2 启用
+    fn backup_pw_config_key() -> &'static str {
+        "sync.backup_pw_enc"
+    }
+
+    /// 把备份密码加密后存入 SQLite（换设备无法解密 → 需重新填）
+    #[allow(dead_code)] // T-S050 Part 2 启用
+    pub fn save_backup_password(db: &Database, password: &str) -> Result<(), AppError> {
+        if password.is_empty() {
+            return Err(AppError::Custom("备份密码不能为空".into()));
+        }
+        let enc = crypto::encrypt(password)?;
+        db.set_config(Self::backup_pw_config_key(), &enc)?;
+        Ok(())
+    }
+
+    /// 从 SQLite 读备份密码密文并解密；解不开（换设备）返回 None
+    #[allow(dead_code)] // T-S050 Part 2 启用
+    pub fn get_backup_password(db: &Database) -> Result<Option<String>, AppError> {
+        match db.get_config(Self::backup_pw_config_key())? {
+            Some(enc) if !enc.is_empty() => crypto::decrypt(&enc).map(Some),
+            _ => Ok(None),
+        }
+    }
+
+    /// 删除 SQLite 中的备份密码密文（关闭加密备份时调）
+    #[allow(dead_code)] // T-S050 Part 2 启用
+    pub fn delete_backup_password(db: &Database) -> Result<(), AppError> {
+        let _ = db.delete_config(Self::backup_pw_config_key())?;
+        Ok(())
+    }
 }
+
+/// T-S050: 加密快照文件的魔数头（8 字节）
+///
+/// 用来识别"这是加密包"，与明文 ZIP（`PK\x03\x04` 开头）区分。
+/// 后缀 `\0` 占位 + 版本位，未来格式变更时可用首字节区分。
+#[allow(dead_code)] // T-S050 Part 2 启用
+const SNAPSHOT_MAGIC: &[u8; 8] = b"KBSNCv1\0";
 
 // ─── 辅助函数 ─────────────────────────────────
 
@@ -607,6 +696,91 @@ fn settings_file_name() -> &'static str {
 mod tests {
     use super::*;
     use std::fs::File;
+
+    // ─── T-S050 快照加密 ─────────────────────────
+
+    #[test]
+    fn snapshot_encrypt_decrypt_roundtrip() {
+        let zip_bytes = b"PK\x03\x04 fake zip content with some bytes \xff\x00\x42".to_vec();
+        let pwd = "my-backup-pass-123";
+
+        let enc = SyncService::encrypt_snapshot(&zip_bytes, pwd).unwrap();
+        // 魔数头正确
+        assert_eq!(&enc[..8], SNAPSHOT_MAGIC);
+        // 密文比明文长（magic 8 + salt 16 + nonce 12 + tag 16 = 52 字节开销）
+        assert_eq!(enc.len(), zip_bytes.len() + 8 + 16 + 12 + 16);
+        // 是加密快照
+        assert!(SyncService::is_encrypted_snapshot(&enc));
+        // 明文 ZIP 不会被误判
+        assert!(!SyncService::is_encrypted_snapshot(&zip_bytes));
+
+        // 正确密码解密 → 还原原始字节
+        let dec = SyncService::decrypt_snapshot(&enc, pwd).unwrap();
+        assert_eq!(dec, zip_bytes);
+    }
+
+    #[test]
+    fn snapshot_decrypt_wrong_password_fails() {
+        let zip_bytes = b"some content".to_vec();
+        let enc = SyncService::encrypt_snapshot(&zip_bytes, "right-pass").unwrap();
+        let r = SyncService::decrypt_snapshot(&enc, "wrong-pass");
+        assert!(r.is_err(), "错误密码必须解密失败");
+        let msg = format!("{}", r.unwrap_err());
+        assert!(msg.contains("密码") || msg.contains("损坏"), "错误信息应提示密码问题: {}", msg);
+    }
+
+    #[test]
+    fn snapshot_decrypt_rejects_non_encrypted() {
+        // 明文 ZIP（PK 头）传给 decrypt → 魔数不匹配（字节数要 ≥ 52 才不会先走"太短"分支）
+        let plain_zip =
+            b"PK\x03\x04 this is a plain zip file body with enough padding bytes here to exceed 52"
+                .to_vec();
+        assert!(plain_zip.len() >= 52);
+        let r = SyncService::decrypt_snapshot(&plain_zip, "anypass");
+        let msg = format!("{}", r.unwrap_err());
+        assert!(msg.contains("魔数"), "got = {}", msg);
+    }
+
+    #[test]
+    fn snapshot_decrypt_rejects_too_short() {
+        let r = SyncService::decrypt_snapshot(b"KBSNCv1\0short", "p");
+        let msg = format!("{}", r.unwrap_err());
+        assert!(msg.contains("太短") || msg.contains("损坏"), "got = {}", msg);
+    }
+
+    #[test]
+    fn snapshot_encrypt_empty_password_rejected() {
+        assert!(SyncService::encrypt_snapshot(b"data", "").is_err());
+    }
+
+    #[test]
+    fn snapshot_encrypt_nondeterministic() {
+        // 同样输入加密两次 → salt/nonce 随机 → 密文不同（但都能解回）
+        let data = b"deterministic input";
+        let e1 = SyncService::encrypt_snapshot(data, "p").unwrap();
+        let e2 = SyncService::encrypt_snapshot(data, "p").unwrap();
+        assert_ne!(e1, e2, "随机 salt/nonce → 密文应不同");
+        assert_eq!(SyncService::decrypt_snapshot(&e1, "p").unwrap(), data);
+        assert_eq!(SyncService::decrypt_snapshot(&e2, "p").unwrap(), data);
+    }
+
+    #[test]
+    fn backup_password_store_roundtrip() {
+        let db = Database::init(":memory:").unwrap();
+        // 初始无密码
+        assert_eq!(SyncService::get_backup_password(&db).unwrap(), None);
+        // 存
+        SyncService::save_backup_password(&db, "backup-pw-xyz").unwrap();
+        assert_eq!(
+            SyncService::get_backup_password(&db).unwrap(),
+            Some("backup-pw-xyz".into())
+        );
+        // 空密码拒绝
+        assert!(SyncService::save_backup_password(&db, "").is_err());
+        // 删
+        SyncService::delete_backup_password(&db).unwrap();
+        assert_eq!(SyncService::get_backup_password(&db).unwrap(), None);
+    }
 
     /// 临时目录内放 4 类文件：3 个 `.sync-tmp-*` 应被删，2 个业务文件必须保留。
     /// 同时放一个同名前缀的子目录 + 子目录内同名前缀文件，验证"不递归子目录"。
