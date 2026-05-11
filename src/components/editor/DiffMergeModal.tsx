@@ -20,7 +20,7 @@
  * 或可编辑性 / 主题」变化时**原地**销毁+重建（不重挂 Modal，所以切换"Markdown 源码/纯文本"不会闪一下重弹窗）。
  */
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Alert, Button, Modal, Space } from "antd";
+import { Alert, Button, Modal, Segmented, Space } from "antd";
 import { MergeView } from "@codemirror/merge";
 import { EditorView, lineNumbers } from "@codemirror/view";
 import { EditorState } from "@codemirror/state";
@@ -94,8 +94,17 @@ export function DiffMergeModal({ open, onClose, left, right, onSave, saveHint, h
   const [hostEl, setHostEl] = useState<HTMLDivElement | null>(null);
   const mvRef = useRef<MergeView | null>(null);
   const [saving, setSaving] = useState(false);
+  // 中缝箭头方向：a-to-b = 把左侧块合并到右侧（▶）；b-to-a = 把右侧块合并到左侧（◀）。
+  // 仅两侧都可编辑时让用户切；否则只有"往可编辑的那侧推"才有意义。
+  const bothEditable = left.editable && right.editable;
+  const [revertDir, setRevertDir] = useState<"a-to-b" | "b-to-a">("a-to-b");
+  const effectiveDir: "a-to-b" | "b-to-a" = bothEditable
+    ? revertDir
+    : left.editable
+      ? "b-to-a"
+      : "a-to-b";
 
-  // host 挂载 / 两侧内容或可编辑性 / 主题 变化 → 原地销毁+重建 MergeView（不重挂 Modal）
+  // host 挂载 / 两侧内容或可编辑性 / 方向 / 主题 变化 → 原地销毁+重建 MergeView（不重挂 Modal）
   useEffect(() => {
     if (!hostEl) return;
     const mv = new MergeView({
@@ -103,7 +112,7 @@ export function DiffMergeModal({ open, onClose, left, right, onSave, saveHint, h
       b: { doc: normalizeEol(right.value), extensions: sideExtensions(right.editable, dark) },
       parent: hostEl,
       orientation: "a-b",
-      revertControls: "a-to-b", // 中缝 ▶：把左(a)的变更块覆盖到右(b)。右侧 = 最终结果。
+      revertControls: effectiveDir, // 中缝箭头方向
       highlightChanges: true,
       gutter: true,
     });
@@ -120,7 +129,7 @@ export function DiffMergeModal({ open, onClose, left, right, onSave, saveHint, h
       mv.destroy();
       if (mvRef.current === mv) mvRef.current = null;
     };
-  }, [hostEl, left.value, right.value, left.editable, right.editable, dark]);
+  }, [hostEl, left.value, right.value, left.editable, right.editable, effectiveDir, dark]);
 
   async function handleSave() {
     if (!onSave || !mvRef.current) return;
@@ -178,9 +187,26 @@ export function DiffMergeModal({ open, onClose, left, right, onSave, saveHint, h
         <span>
           左 = {left.label}
           {left.editable ? "" : "（只读）"}，右 = {right.label}
-          {right.editable ? "" : "（只读）"}。中缝 ▶ 把左侧变更块覆盖到右侧；两栏均可直接编辑（行不换行，可横向滚）。
+          {right.editable ? "" : "（只读）"}。中缝箭头把变更块合并到
+          {effectiveDir === "a-to-b" ? "右侧" : "左侧"}；两栏可直接编辑（行不换行，可横向滚）。
         </span>
-        {headerExtra && <span style={{ flexShrink: 0 }}>{headerExtra}</span>}
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
+          {bothEditable && (
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+              <span>合并方向</span>
+              <Segmented
+                size="small"
+                value={revertDir}
+                onChange={(v) => setRevertDir(v as "a-to-b" | "b-to-a")}
+                options={[
+                  { label: "← 合并到左", value: "b-to-a" },
+                  { label: "合并到右 →", value: "a-to-b" },
+                ]}
+              />
+            </span>
+          )}
+          {headerExtra}
+        </span>
       </div>
       <div
         ref={setHostEl}
