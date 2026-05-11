@@ -2870,8 +2870,10 @@ mod draft_note_tests {
                 sort_order: 0,
                 children: vec![],
                 note_count: 0,
+                color: None,
             }],
             note_count: 0,
+            color: None,
         };
         let mut out = Vec::new();
         collect_folder_paths(&[f], "", &mut out);
