@@ -4,8 +4,10 @@
 //! 且本项目已用 `#[cfg(desktop)]` 把 updater 隔离掉了。移动端没有"原地热替换"
 //! 的能力（Android 必须走系统安装器、iOS 必须走 App Store），所以这里只做：
 //!
-//!   1. 拉同一份 `update.json`（桌面 updater 也读这个）
-//!   2. 比对 `version` 字段与当前 App 版本
+//!   1. 拉移动端独立的 `update-mobile.json`（**不是**桌面那份 `update.json`——
+//!      移动端有自己的版本线，从 0.1.0 起，跟桌面 1.x 解耦）
+//!   2. 比对 `version` 字段与当前 App 版本（Android 的版本号来自
+//!      `tauri.android.conf.json` 的 `version`，会被编译进 `package_info()`）
 //!   3. 返回是否有新版本 + 更新说明 + APK 下载 URL
 //!
 //! 前端拿到结果后弹个对话框，用户点"去下载"就用 `tauri-plugin-opener` 打开
@@ -13,31 +15,30 @@
 //! 开"允许安装未知应用"，那是浏览器的权限不是本 App 的，所以 manifest 不用加
 //! `REQUEST_INSTALL_PACKAGES`）。
 //!
-//! `update.json` schema（与 tauri-plugin-updater 约定一致）：
+//! `update-mobile.json` schema（扁平结构，只服务 Android）：
 //! ```json
 //! {
-//!   "version": "1.8.1",
+//!   "version": "0.1.0",
 //!   "notes": "更新说明",
 //!   "pub_date": "2026-...",
-//!   "platforms": {
-//!     "windows-x86_64": { "url": "...", "signature": "..." },
-//!     "android-arm64":   { "url": "...apk" }   ← 本命令读这个；没有则回落下载页
-//!   }
+//!   "url": "https://.../Knowledge.Base_0.1.0_android-arm64.apk"
 //! }
 //! ```
+//! 兼容兜底：也认旧的 `platforms.android-arm64.url` 嵌套写法；都没有则回落到
+//! release 仓库的发布页让用户自己挑。
 
 use serde::Serialize;
 
-/// 与桌面 updater 配置（`tauri.conf.json` → `plugins.updater.endpoints`）保持一致，
-/// 按顺序尝试，第一个能拿到合法 JSON 的就用。
+/// 移动端独立更新源，按顺序尝试，第一个能拿到合法 JSON 的就用（R2 主 / GitHub / Gitee 兜底）。
+/// 跟桌面 `tauri.conf.json` → `plugins.updater.endpoints`（那是 `update.json`）是两套。
 const UPDATE_JSON_ENDPOINTS: &[&str] = &[
-    "https://pub-9d9e6c0cb6934fb0a0c505e3c64f39b2.r2.dev/knowledge-base/update.json",
-    "https://gitee.com/bkywksj/knowledge-base-release/raw/master/update.json",
-    "https://github.com/bkywksj/knowledge-base-release/raw/main/update.json",
+    "https://pub-9d9e6c0cb6934fb0a0c505e3c64f39b2.r2.dev/knowledge-base/update-mobile.json",
+    "https://gitee.com/bkywksj/knowledge-base-release/raw/master/update-mobile.json",
+    "https://github.com/bkywksj/knowledge-base-release/raw/main/update-mobile.json",
 ];
 
-/// 当 `update.json` 里没有 `platforms.android-arm64.url` 时，回落到 release 仓库
-/// 的发布页，让用户自己挑 APK。
+/// 当 `update-mobile.json` 里没有可用的 APK URL 时，回落到 release 仓库的发布页，
+/// 让用户自己挑 APK。
 const RELEASE_PAGE_FALLBACK: &str = "https://gitee.com/bkywksj/knowledge-base-release/releases";
 
 #[derive(Debug, Serialize)]
@@ -103,7 +104,7 @@ pub async fn check_mobile_update(app: tauri::AppHandle) -> Result<MobileUpdateIn
     let latest_version = json
         .get("version")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| "update.json 缺少 version 字段".to_string())?
+        .ok_or_else(|| "update-mobile.json 缺少 version 字段".to_string())?
         .to_string();
     let notes = json
         .get("notes")
@@ -111,17 +112,23 @@ pub async fn check_mobile_update(app: tauri::AppHandle) -> Result<MobileUpdateIn
         .unwrap_or("")
         .to_string();
 
-    // APK 直链：platforms.android-arm64.url > platforms.android-aarch64.url > 回落发布页
+    // APK 直链：优先顶层 `url`（新版扁平结构）；兼容旧的 `platforms.android-arm64.url`
+    // 嵌套写法；都没有则回落到 release 发布页让用户自己挑。
     let download_url = json
-        .get("platforms")
-        .and_then(|p| {
-            p.get("android-arm64")
-                .or_else(|| p.get("android-aarch64"))
-                .or_else(|| p.get("android"))
-        })
-        .and_then(|entry| entry.get("url"))
+        .get("url")
         .and_then(|u| u.as_str())
         .map(|s| s.to_string())
+        .or_else(|| {
+            json.get("platforms")
+                .and_then(|p| {
+                    p.get("android-arm64")
+                        .or_else(|| p.get("android-aarch64"))
+                        .or_else(|| p.get("android"))
+                })
+                .and_then(|entry| entry.get("url"))
+                .and_then(|u| u.as_str())
+                .map(|s| s.to_string())
+        })
         .unwrap_or_else(|| RELEASE_PAGE_FALLBACK.to_string());
 
     Ok(MobileUpdateInfo {

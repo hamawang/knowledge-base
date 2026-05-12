@@ -2,11 +2,17 @@
 # Android 构建工作流（移动端 T-M020）
 # =============================================================================
 #
+# 🔴 移动端有独立版本线：版本号读 `src-tauri/tauri.android.conf.json` 的 `version`
+#    （从 0.1.0 起，跟桌面 `tauri.conf.json` 的 1.x 解耦）。Tauri 2 构建 Android 时
+#    会自动把 tauri.android.conf.json 合并覆盖到 tauri.conf.json，所以 APK 的
+#    versionName 和编译进去的 `package_info().version` 都是这个独立版本。
+#
 # 触发方式：
 #   - workflow_dispatch（手动触发；可选 debug / release，默认 debug）
-#   - 推送 v*.*.*-mobile.* 格式的 Tag → 一律走 release 正式签名构建（与桌面 v*.*.*
-#     区分，避免桌面构建 + Android 构建相互打架）；release-publish 流程就靠这个 tag
-#     触发拿到正式签名 APK
+#   - 推送 mobile-v*.*.* 格式的 Tag（例 mobile-v0.1.0）→ 一律走 release 正式签名构建。
+#     **不是** v*.*.*（那是桌面 release.yml 的）—— 两套 tag 互不干扰。release-publish
+#     的「移动端发布」流程就靠推 mobile-v<移动版本> tag 触发拿到正式签名 APK。
+#     ⚠️ 被 tag 的那个 commit 的消息不能含 `[skip ci]`，否则 tag push 也会被跳过。
 #
 # 构建类型：
 #   - debug：SDK 自带 debug keystore 自签名，可直接侧载（仅 workflow_dispatch 选 debug 时）
@@ -22,16 +28,15 @@
 #   - TAURI_SIGNING_PRIVATE_KEY      tauri updater 私钥（src-tauri/keys/tauri-updater.key 内容）
 #   - TAURI_SIGNING_PRIVATE_KEY_PASSWORD  （空）
 #
-# 产物（统一起名，与桌面产物 Knowledge.Base_x.y.z_... 同风格）：
-#   - Knowledge.Base_<version>_android-arm64.apk   （侧载 / App 内"检查更新"下载）
-#   - Knowledge.Base_<version>_android-arm64.aab   （release 才有，传 Google Play）
+# 产物（起名 Knowledge.Base_<移动版本>_android-arm64.xxx，移动版本来自 tauri.android.conf.json）：
+#   - Knowledge.Base_<移动版本>_android-arm64.apk   （侧载 / App 内"检查更新"下载）
+#   - Knowledge.Base_<移动版本>_android-arm64.aab   （release 才有，传 Google Play）
 #
 # 上传到：
 #   - GitHub Actions Artifacts（30 天后自动清理）
-#   - tag 触发时附加到本仓库 GitHub Release（草稿）
-#     → /release 流程生成 update.json 时把 platforms.android-arm64.url 指向：
-#       https://github.com/bkywksj/knowledge-base/releases/download/<tag>/Knowledge.Base_<version>_android-arm64.apk
-#       App 内 check_mobile_update 命令读 update.json 拿到这个直链 → openUrl 下载安装
+#   - tag 触发时附加到本仓库 GitHub Release（草稿，tag = mobile-v<移动版本>）
+#     → release-publish 的移动端发布流程把 APK 放进 release 仓 + 生成 update-mobile.json，
+#       App 内 check_mobile_update 命令读 update-mobile.json 拿到 APK 直链 → openUrl 下载安装
 # =============================================================================
 
 name: Android Build
@@ -49,7 +54,7 @@ on:
           - release
   push:
     tags:
-      - 'v*.*.*-mobile.*'
+      - 'mobile-v*.*.*'
 
 jobs:
   build:
@@ -131,13 +136,14 @@ jobs:
       - name: List build outputs
         run: find src-tauri/gen/android/app/build/outputs -type f \( -name '*.apk' -o -name '*.aab' \) -print
 
-      # 给产物起稳定名 Knowledge.Base_<version>_android-arm64.apk —— App 内"检查更新"
-      # 的 update.json 会指向这个固定文件名（与桌面产物 Knowledge.Base_x.y.z_... 同风格）。
+      # 给产物起稳定名 Knowledge.Base_<移动版本>_android-arm64.apk —— App 内"检查更新"
+      # 的 update-mobile.json 会指向这个固定文件名。版本号读移动端独立配置
+      # tauri.android.conf.json（**不是** package.json，那是桌面 1.x）。
       # 这一步对 debug / release 都跑（debug 也方便侧载时辨认版本）。
       - name: Stage renamed artifacts
         id: stage
         run: |
-          VERSION=$(node -p "require('./package.json').version")
+          VERSION=$(node -p "require('./src-tauri/tauri.android.conf.json').version")
           mkdir -p dist-android
           APK=$(find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' | head -n 1)
           cp "$APK" "dist-android/Knowledge.Base_${VERSION}_android-arm64.apk"
@@ -149,14 +155,14 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: knowledge-base-android-${{ github.event.inputs.build_type || 'debug' }}-v${{ steps.stage.outputs.version }}
+          name: knowledge-base-android-${{ (startsWith(github.ref, 'refs/tags/') && 'release') || github.event.inputs.build_type || 'debug' }}-v${{ steps.stage.outputs.version }}
           path: dist-android/*
           if-no-files-found: error
           retention-days: 30
 
-      # tag 触发时把 APK/AAB 附到本仓库的 GitHub Release 草稿。
-      # 之后 /release 流程生成 update.json 时，platforms.android-arm64.url 指向：
-      #   https://github.com/bkywksj/knowledge-base/releases/download/<tag>/Knowledge.Base_<version>_android-arm64.apk
+      # tag 触发时把 APK/AAB 附到本仓库的 GitHub Release 草稿（tag = mobile-v<移动版本>）。
+      # release-publish 的移动端发布流程从这个草稿（或上面的 Actions artifact）取产物，
+      # 放进 release 仓 releases/mobile-v<版本>/ + 生成 update-mobile.json。
       - name: Attach to Release (only on tag)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
