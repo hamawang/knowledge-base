@@ -42,12 +42,19 @@ impl Database {
 
     /// 用指定的 stable_uuid 创建笔记（同步 V1 pull 用：保留远端 UUID 让多端 ID 稳定）
     ///
-    /// 与 `create_note` 区别：UUID 由调用方传入而非内部生成。冲突时返回 SQLite UNIQUE 错误，
-    /// 上层 pull 流程应先用 `get_note_id_by_stable_uuid` 查重决定 update / create。
+    /// 与 `create_note` 区别：
+    /// - UUID 由调用方传入而非内部生成。冲突时返回 SQLite UNIQUE 错误，
+    ///   上层 pull 流程应先用 `get_note_id_by_stable_uuid` 查重决定 update / create。
+    /// - `is_daily` / `daily_date`：从远端 manifest entry 透传过来，恢复"每日笔记"标记。
+    ///   这是修复 **日记跨端同步丢失 is_daily → 对端 `get_or_create_daily` 认不出来 → 每天反复
+    ///   新建一条** 的关键。`is_daily=false` 时 `daily_date` 强制存 NULL；
+    ///   旧 manifest 不带这些信息时调用方传 `false, None`，靠 `get_or_create_daily` 的兜底认领自愈。
     pub fn create_note_with_uuid(
         &self,
         input: &NoteInput,
         stable_uuid: &str,
+        is_daily: bool,
+        daily_date: Option<&str>,
     ) -> Result<Note, AppError> {
         let conn = self
             .conn
@@ -55,20 +62,96 @@ impl Database {
             .map_err(|e| AppError::Custom(e.to_string()))?;
         let normalized = crate::database::links::normalize_title(&input.title);
         let content_hash = crate::services::hash::sha256_hex(&input.content);
+        // 防御：非日记一律不带 daily_date，避免脏数据
+        let daily_date_val: Option<&str> = if is_daily { daily_date } else { None };
         conn.execute(
-            "INSERT INTO notes (title, content, folder_id, title_normalized, content_hash, stable_uuid)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO notes
+                (title, content, folder_id, title_normalized, content_hash, stable_uuid, is_daily, daily_date)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 input.title,
                 input.content,
                 input.folder_id,
                 normalized,
                 content_hash,
-                stable_uuid
+                stable_uuid,
+                is_daily as i32,
+                daily_date_val,
             ],
         )?;
         let id = conn.last_insert_rowid();
         self.get_note_inner(&conn, id)
+    }
+
+    /// 同步 V1 pull 用：把本地某条笔记的"每日笔记"标记对齐到远端 manifest entry。
+    ///
+    /// - 远端说它是日记（`is_daily=true`），本地这条 `is_daily=0` → 设 `is_daily=1, daily_date=date`，
+    ///   **但前提是本地没有另一条同 `daily_date` 的真日记**（否则会出现"两条当天日记"，反而更乱）；
+    ///   有冲突则跳过 + 记 warn 日志，留给用户清理。
+    /// - 远端说它不是日记（`is_daily=false`），本地这条 `is_daily=1` → 清掉标记（`is_daily=0, daily_date=NULL`）。
+    /// - 其余情况（两边一致）→ 无操作。
+    ///
+    /// **不动 `updated_at`**：元数据对齐，不算内容变更，不应触发下一轮推拉。
+    pub fn sync_note_daily_state(
+        &self,
+        id: i64,
+        is_daily: bool,
+        daily_date: Option<&str>,
+    ) -> Result<(), AppError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| AppError::Custom(e.to_string()))?;
+        let cur_is_daily: bool = match conn
+            .query_row(
+                "SELECT is_daily FROM notes WHERE id = ?1",
+                params![id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+        {
+            Some(v) => v != 0,
+            None => return Ok(()), // 笔记不在了
+        };
+
+        match (is_daily, cur_is_daily) {
+            (true, false) => {
+                let date = match daily_date {
+                    Some(d) if !d.is_empty() => d,
+                    _ => return Ok(()), // 远端说是日记却没给日期 → 不动
+                };
+                let conflict: Option<i64> = conn
+                    .query_row(
+                        "SELECT id FROM notes
+                         WHERE is_daily = 1 AND daily_date = ?1 AND is_deleted = 0 AND id != ?2
+                         LIMIT 1",
+                        params![date, id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if let Some(other) = conflict {
+                    log::warn!(
+                        "[sync] note#{} 远端标记为 {} 的日记，但本地 note#{} 已占着这天 → 保持 note#{} 为普通笔记，请手动合并",
+                        id, date, other, id
+                    );
+                    return Ok(());
+                }
+                conn.execute(
+                    "UPDATE notes SET is_daily = 1, daily_date = ?1 WHERE id = ?2",
+                    params![date, id],
+                )?;
+                log::info!("[sync] note#{} 从远端 manifest 恢复为 {} 的每日笔记", id, date);
+            }
+            (false, true) => {
+                conn.execute(
+                    "UPDATE notes SET is_daily = 0, daily_date = NULL WHERE id = ?1",
+                    params![id],
+                )?;
+                log::info!("[sync] note#{} 远端已不是每日笔记 → 本地清除 is_daily 标记", id);
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     /// 按 stable_uuid 读取笔记的 (is_encrypted, encrypted_blob)（T-S014 同步加密笔记用）
@@ -1057,6 +1140,34 @@ impl Database {
         if let Some(note) = existing {
             return Ok(note);
         }
+        drop(stmt);
+
+        // 兜底：认领"伪日记" —— 早期同步协议没把 is_daily 写进 manifest，从别的端拉过来的日记
+        // 会落成 is_daily=0、标题仍是程序生成的 "{date} 的日记" 的普通笔记。这里把它认领为当天日记
+        // （UPDATE is_daily=1, daily_date），而不是再 INSERT 一条 → 阻止日记在多端反复增殖；
+        // 也覆盖"新旧客户端共存的过渡期"（旧端推上来的 entry 还没带 is_daily）。
+        let claim_title = format!("{} 的日记", date);
+        let claimed_id: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM notes
+                 WHERE title = ?1 AND is_daily = 0 AND is_deleted = 0
+                 ORDER BY id ASC LIMIT 1",
+                params![claim_title],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(claimed) = claimed_id {
+            conn.execute(
+                "UPDATE notes SET is_daily = 1, daily_date = ?1 WHERE id = ?2",
+                params![date, claimed],
+            )?;
+            log::info!(
+                "[daily] 认领同步拉来的伪日记 note#{} 为 {} 的日记（不新建，避免重复）",
+                claimed,
+                date
+            );
+            return self.get_note_inner(&conn, claimed);
+        }
 
         // 不存在则创建
         let title = format!("{} 的日记", date);
@@ -1454,5 +1565,153 @@ mod stable_uuid_tests {
             .get_note_id_by_stable_uuid("00000000-0000-0000-0000-000000000000")
             .unwrap();
         assert_eq!(none, None);
+    }
+
+    // ───────── 日记重复 bug 修复：is_daily 跨端同步 + 兜底认领 ─────────
+
+    fn note_daily_state(db: &Database, id: i64) -> (bool, Option<String>) {
+        let conn = db.conn_lock().unwrap();
+        conn.query_row(
+            "SELECT is_daily, daily_date FROM notes WHERE id = ?1",
+            params![id],
+            |r| Ok((r.get::<_, i64>(0)? != 0, r.get::<_, Option<String>>(1)?)),
+        )
+        .unwrap()
+    }
+
+    /// create_note_with_uuid 透传 is_daily / daily_date；非日记时 daily_date 强制 NULL
+    #[test]
+    fn create_note_with_uuid_carries_daily_fields() {
+        let db = fresh_db();
+
+        let daily = db
+            .create_note_with_uuid(
+                &NoteInput {
+                    title: "2026-05-12 的日记".into(),
+                    content: "今天写了点东西".into(),
+                    folder_id: None,
+                },
+                "11111111-1111-1111-1111-111111111111",
+                true,
+                Some("2026-05-12"),
+            )
+            .unwrap();
+        assert_eq!(note_daily_state(&db, daily.id), (true, Some("2026-05-12".into())));
+
+        // is_daily=false 时即便传了 daily_date 也要落 NULL（防脏数据）
+        let plain = db
+            .create_note_with_uuid(
+                &NoteInput {
+                    title: "普通".into(),
+                    content: "x".into(),
+                    folder_id: None,
+                },
+                "22222222-2222-2222-2222-222222222222",
+                false,
+                Some("2026-05-12"),
+            )
+            .unwrap();
+        assert_eq!(note_daily_state(&db, plain.id), (false, None));
+    }
+
+    /// get_or_create_daily 遇到"同步拉来的伪日记"（is_daily=0、标题是 "{date} 的日记"）
+    /// 应认领它而不是新建 → 不会出现重复日记
+    #[test]
+    fn get_or_create_daily_claims_pseudo_daily_instead_of_creating() {
+        let db = fresh_db();
+
+        // 模拟早期同步：从别的端拉来一条日记，落成了 is_daily=0 的普通笔记
+        let pseudo = db
+            .create_note_with_uuid(
+                &NoteInput {
+                    title: "2026-05-12 的日记".into(),
+                    content: "别的端写的内容".into(),
+                    folder_id: None,
+                },
+                "33333333-3333-3333-3333-333333333333",
+                false,
+                None,
+            )
+            .unwrap();
+        assert_eq!(note_daily_state(&db, pseudo.id), (false, None));
+
+        // 用户打开"今天的日记" → 应认领 pseudo，而不是新建
+        let got = db.get_or_create_daily("2026-05-12").unwrap();
+        assert_eq!(got.id, pseudo.id, "应认领已存在的伪日记，而非新建");
+        assert_eq!(got.content, "别的端写的内容", "认领时内容保持不变");
+        assert_eq!(note_daily_state(&db, pseudo.id), (true, Some("2026-05-12".into())));
+
+        // 再调一次 → 还是同一条（现在是真日记了，第一步查询就命中）
+        let again = db.get_or_create_daily("2026-05-12").unwrap();
+        assert_eq!(again.id, pseudo.id);
+
+        // 全程只有 1 条 "2026-05-12 的日记"
+        let cnt: i64 = {
+            let conn = db.conn_lock().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM notes WHERE title = ?1 AND is_deleted = 0",
+                params!["2026-05-12 的日记"],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(cnt, 1, "不能因为同步又多出一条日记");
+    }
+
+    /// get_or_create_daily 没有任何同名笔记时仍然正常新建
+    #[test]
+    fn get_or_create_daily_creates_when_nothing_to_claim() {
+        let db = fresh_db();
+        let d1 = db.get_or_create_daily("2026-05-12").unwrap();
+        assert_eq!(note_daily_state(&db, d1.id), (true, Some("2026-05-12".into())));
+        let d2 = db.get_or_create_daily("2026-05-12").unwrap();
+        assert_eq!(d1.id, d2.id, "同一天反复调应返回同一条");
+    }
+
+    /// sync_note_daily_state：恢复（远端是日记本地不是）+ 清除（远端不是日记本地是）
+    #[test]
+    fn sync_note_daily_state_recovers_and_clears() {
+        let db = fresh_db();
+        let n = db
+            .create_note(&NoteInput {
+                title: "2026-05-12 的日记".into(),
+                content: "x".into(),
+                folder_id: None,
+            })
+            .unwrap();
+        assert_eq!(note_daily_state(&db, n.id), (false, None));
+
+        // 远端说它是 2026-05-12 的日记 → 恢复标记
+        db.sync_note_daily_state(n.id, true, Some("2026-05-12")).unwrap();
+        assert_eq!(note_daily_state(&db, n.id), (true, Some("2026-05-12".into())));
+
+        // 远端说它不是日记了 → 清掉标记
+        db.sync_note_daily_state(n.id, false, None).unwrap();
+        assert_eq!(note_daily_state(&db, n.id), (false, None));
+
+        // 两边一致（都不是日记）→ 无操作、不报错
+        db.sync_note_daily_state(n.id, false, None).unwrap();
+        assert_eq!(note_daily_state(&db, n.id), (false, None));
+    }
+
+    /// sync_note_daily_state：本地已有同日真日记时跳过（不制造"两条当天日记"）
+    #[test]
+    fn sync_note_daily_state_skips_on_conflict() {
+        let db = fresh_db();
+        // 本地已有 2026-05-12 的真日记
+        let real = db.get_or_create_daily("2026-05-12").unwrap();
+        // 另一条普通笔记（比如多端各自建过日记，被同步拉过来一条）
+        let other = db
+            .create_note(&NoteInput {
+                title: "2026-05-12 的日记".into(),
+                content: "另一端的".into(),
+                folder_id: None,
+            })
+            .unwrap();
+
+        // 远端说 other 也是 2026-05-12 的日记 → 因为 real 占着这天，应跳过
+        db.sync_note_daily_state(other.id, true, Some("2026-05-12")).unwrap();
+        assert_eq!(note_daily_state(&db, other.id), (false, None), "冲突时应保持 other 为普通笔记");
+        assert_eq!(note_daily_state(&db, real.id), (true, Some("2026-05-12".into())), "原日记不受影响");
     }
 }

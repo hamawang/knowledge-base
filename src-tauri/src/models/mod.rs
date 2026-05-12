@@ -1298,6 +1298,16 @@ pub struct ManifestEntry {
     /// 拉取后写入 notes.encrypted_blob + is_encrypted=1 + content="🔒 已加密" 占位
     #[serde(default)]
     pub encrypted: bool,
+    /// 是否每日笔记（notes.is_daily）。修复"日记跨端同步丢失 is_daily → 对端 get_or_create_daily
+    /// 认不出来 → 每天反复新建一条" 的 bug：push 端把 is_daily 写进 manifest，pull 端据此
+    /// 用 `create_note_with_uuid(..., is_daily, daily_date)` 恢复。
+    /// 旧 manifest 无此字段 → 反序列化为 false（pull 端靠 `get_or_create_daily` 的兜底认领自愈）。
+    #[serde(default)]
+    pub is_daily: bool,
+    /// 每日笔记的日期（YYYY-MM-DD，来自 notes.daily_date）；`is_daily=true` 时有值，否则 None。
+    /// 旧 manifest 无此字段 → None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daily_date: Option<String>,
 }
 
 /// V1 同步 manifest 顶层的附件清单条目（T-S022 sidecar CAS 附件同步）

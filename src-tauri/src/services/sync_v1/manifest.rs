@@ -72,7 +72,7 @@ pub fn compute_local_manifest(
     // 不会被同步出去（自动隔离损坏数据）。
     let mut stmt = conn.prepare(
         "SELECT stable_uuid, title, content_hash, updated_at, folder_id, is_deleted, deleted_at,
-                is_encrypted, encrypted_blob
+                is_encrypted, encrypted_blob, is_daily, daily_date
          FROM notes
          WHERE stable_uuid IS NOT NULL
            AND (is_deleted = 0 OR (is_deleted = 1 AND deleted_at IS NOT NULL AND deleted_at >= ?1))",
@@ -88,6 +88,8 @@ pub fn compute_local_manifest(
         Option<String>,
         i64,
         Option<Vec<u8>>,
+        i64,            // is_daily
+        Option<String>, // daily_date
     )> = stmt
         .query_map(rusqlite::params![tombstone_cutoff], |row| {
             Ok((
@@ -102,6 +104,8 @@ pub fn compute_local_manifest(
                 row.get::<_, Option<String>>(6)?,
                 row.get::<_, i64>(7)?,
                 row.get::<_, Option<Vec<u8>>>(8)?,
+                row.get::<_, i64>(9)?,
+                row.get::<_, Option<String>>(10)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -137,6 +141,8 @@ pub fn compute_local_manifest(
         deleted_at,
         is_encrypted_int,
         encrypted_blob,
+        is_daily_int,
+        daily_date,
     ) in rows
     {
         let path = folder_path_for(&folders_by_id, folder_id);
@@ -162,6 +168,7 @@ pub fn compute_local_manifest(
         } else {
             content_hash_col
         };
+        let is_daily = is_daily_int != 0;
         entries.push(ManifestEntry {
             stable_id: stable_uuid.clone(),
             title: title.clone(),
@@ -171,6 +178,9 @@ pub fn compute_local_manifest(
             tombstone,
             folder_path: path,
             encrypted,
+            is_daily,
+            // 防御：非日记不带 daily_date（避免脏数据传播到其他端）
+            daily_date: if is_daily { daily_date } else { None },
         });
     }
 
@@ -398,6 +408,14 @@ pub fn diff_manifests(local: &SyncManifestV1, remote: &SyncManifestV1) -> Manife
             }
 
             if le.content_hash == re.content_hash {
+                // 内容一致，但修复历史"伪日记"：远端 manifest 标记这条是每日笔记、本地这条却不是
+                // （早期同步协议没传 is_daily，对端 pull 后变成 is_daily=0 的普通笔记）。
+                // 拉一次（update_note 内容不变）让 pull.rs 顺带 sync_note_daily_state 把标记补回来。
+                // 仅做"恢复 is_daily"这个单向修复；反方向（本地是日记、远端不是）不动，靠 merge_manifests
+                // 用本地全量写远端 manifest 自然把 is_daily 带上去，下一轮其他端就能看到。
+                if re.is_daily && !le.is_daily {
+                    diff.to_pull.push((*re).clone());
+                }
                 continue;
             }
             // hash 不同 → 比时间
@@ -429,7 +447,17 @@ mod tests {
             tombstone,
             folder_path: String::new(),
             encrypted: false,
+            is_daily: false,
+            daily_date: None,
         }
+    }
+
+    /// 同 `entry` 但显式给定每日笔记标记（is_daily 修复相关测试用）
+    fn daily_entry(id: &str, title: &str, hash: &str, ts: &str, date: &str) -> ManifestEntry {
+        let mut e = entry(id, title, hash, ts, false);
+        e.is_daily = true;
+        e.daily_date = Some(date.into());
+        e
     }
 
     fn manifest(entries: Vec<ManifestEntry>) -> SyncManifestV1 {
@@ -1011,5 +1039,127 @@ mod tests {
         assert!(hashes.contains("common"));
         assert!(hashes.contains("local_only"));
         assert!(hashes.contains("remote_only"));
+    }
+
+    // ───────── 日记重复 bug 修复：is_daily / daily_date 进 manifest ─────────
+
+    /// compute_local_manifest 把笔记的 is_daily / daily_date 填进 entry
+    #[test]
+    fn compute_local_manifest_carries_daily_flag() {
+        use crate::models::NoteInput;
+        let db = Database::init(":memory:").unwrap();
+
+        let _plain = db
+            .create_note(&NoteInput {
+                title: "普通笔记".into(),
+                content: "x".into(),
+                folder_id: None,
+            })
+            .unwrap();
+        let daily = db.get_or_create_daily("2026-05-12").unwrap();
+
+        let m = compute_local_manifest(&db, "test", "host").unwrap();
+
+        let plain_entry = m.entries.iter().find(|e| e.title == "普通笔记").unwrap();
+        assert!(!plain_entry.is_daily, "普通笔记 entry.is_daily 必须 false");
+        assert!(plain_entry.daily_date.is_none(), "普通笔记不带 daily_date");
+
+        let daily_uuid: String = {
+            let conn = db.conn_lock().unwrap();
+            conn.query_row(
+                "SELECT stable_uuid FROM notes WHERE id = ?1",
+                rusqlite::params![daily.id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let de = m
+            .entries
+            .iter()
+            .find(|e| e.stable_id == daily_uuid)
+            .expect("日记 entry 必须在 manifest 里");
+        assert!(de.is_daily, "日记 entry.is_daily 必须 true");
+        assert_eq!(de.daily_date.as_deref(), Some("2026-05-12"));
+    }
+
+    /// diff：内容相同但远端标记为日记、本地不是 → 放进 to_pull 以恢复 is_daily
+    #[test]
+    fn diff_recovers_daily_flag_when_remote_is_daily() {
+        let local = manifest(vec![entry("1", "2026-05-12 的日记", "h1", "2026-05-12", false)]);
+        let remote = manifest(vec![daily_entry(
+            "1",
+            "2026-05-12 的日记",
+            "h1",
+            "2026-05-12",
+            "2026-05-12",
+        )]);
+        let d = diff_manifests(&local, &remote);
+        assert_eq!(d.to_pull.len(), 1, "应拉一次以恢复 is_daily");
+        assert!(d.to_pull[0].is_daily);
+        assert_eq!(d.to_pull[0].daily_date.as_deref(), Some("2026-05-12"));
+        assert_eq!(d.to_push.len(), 0);
+        assert_eq!(d.conflicts.len(), 0);
+    }
+
+    /// diff：双方都是日记且内容相同 → 不触发额外 pull
+    #[test]
+    fn diff_no_recover_when_both_daily() {
+        let e = daily_entry("1", "2026-05-12 的日记", "h1", "2026-05-12", "2026-05-12");
+        let d = diff_manifests(&manifest(vec![e.clone()]), &manifest(vec![e]));
+        assert_eq!(d.to_pull.len(), 0);
+        assert_eq!(d.to_push.len(), 0);
+    }
+
+    /// diff：本地是日记、远端不是（旧端写的 manifest）→ 不通过 diff 改本地
+    #[test]
+    fn diff_no_clear_when_local_daily_remote_not() {
+        let local = manifest(vec![daily_entry(
+            "1",
+            "2026-05-12 的日记",
+            "h1",
+            "2026-05-12",
+            "2026-05-12",
+        )]);
+        let remote = manifest(vec![entry("1", "2026-05-12 的日记", "h1", "2026-05-12", false)]);
+        let d = diff_manifests(&local, &remote);
+        assert_eq!(d.to_pull.len(), 0, "不能把本地刚标记的日记又改回普通笔记");
+        assert_eq!(d.to_push.len(), 0);
+    }
+
+    /// 旧 manifest（无 isDaily/dailyDate 字段）能反序列化为 is_daily=false / daily_date=None
+    #[test]
+    fn old_manifest_entry_without_daily_fields_deserializes() {
+        let json = r#"{
+            "manifestVersion": 1,
+            "appVersion": "1.0.0",
+            "device": "old-host",
+            "generatedAt": "2026-01-01 00:00:00",
+            "entries": [{
+                "stableId": "11111111-1111-1111-1111-111111111111",
+                "title": "x",
+                "contentHash": "h",
+                "updatedAt": "2026-01-01",
+                "remotePath": "notes/x.md"
+            }]
+        }"#;
+        let m: SyncManifestV1 = serde_json::from_str(json).expect("旧 manifest 必须能反序列化");
+        assert_eq!(m.entries.len(), 1);
+        assert!(!m.entries[0].is_daily);
+        assert!(m.entries[0].daily_date.is_none());
+    }
+
+    /// 新 manifest entry 序列化出 isDaily（daily_date=None 时不输出 dailyDate）
+    #[test]
+    fn new_manifest_entry_serializes_is_daily() {
+        let json = serde_json::to_string(&manifest(vec![daily_entry(
+            "1", "x", "h", "t", "2026-05-12",
+        )]))
+        .unwrap();
+        assert!(json.contains("\"isDaily\":true"), "got = {}", json);
+        assert!(json.contains("\"dailyDate\":\"2026-05-12\""), "got = {}", json);
+
+        let json2 = serde_json::to_string(&manifest(vec![entry("1", "x", "h", "t", false)])).unwrap();
+        assert!(json2.contains("\"isDaily\":false"), "got = {}", json2);
+        assert!(!json2.contains("dailyDate"), "非日记不应输出 dailyDate; got = {}", json2);
     }
 }

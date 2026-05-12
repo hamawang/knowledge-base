@@ -335,7 +335,20 @@ pub fn pull<R: Runtime, E: Emitter<R>>(
                     continue; // 不 update_note、不 upsert_remote_state → 保留本地，等用户在设置页解决
                 }
                 match db.update_note(local_id, &input) {
-                    Ok(_) => Some(local_id),
+                    Ok(_) => {
+                        // 修复日记重复 bug：把"每日笔记"标记对齐到远端 manifest entry
+                        // （远端是日记本地却不是 → 恢复 is_daily/daily_date；反之则清掉标记）
+                        if let Err(e) = db.sync_note_daily_state(
+                            local_id,
+                            entry.is_daily,
+                            entry.daily_date.as_deref(),
+                        ) {
+                            result
+                                .errors
+                                .push(format!("对齐日记标记失败 {}: {}", entry.title, e));
+                        }
+                        Some(local_id)
+                    }
                     Err(e) => {
                         result
                             .errors
@@ -345,8 +358,14 @@ pub fn pull<R: Runtime, E: Emitter<R>>(
                 }
             }
             None => {
-                // 本地没有 → 用远端 UUID 创建（保持多端 ID 稳定）
-                match db.create_note_with_uuid(&input, &entry.stable_id) {
+                // 本地没有 → 用远端 UUID 创建（保持多端 ID 稳定）+ 透传 is_daily/daily_date
+                // （否则拉来的日记会变成普通笔记，对端 get_or_create_daily 认不出来 → 反复新建）
+                match db.create_note_with_uuid(
+                    &input,
+                    &entry.stable_id,
+                    entry.is_daily,
+                    entry.daily_date.as_deref(),
+                ) {
                     Ok(n) => Some(n.id),
                     Err(e) => {
                         result

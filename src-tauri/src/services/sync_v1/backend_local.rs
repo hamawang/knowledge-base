@@ -199,6 +199,8 @@ mod tests {
                 tombstone: false,
                 folder_path: "工作/周报".into(),
                 encrypted: false,
+                is_daily: false,
+                daily_date: None,
             }],
             hash_algo: Some(SyncManifestV1::HASH_ALGO_V2.into()),
             vault: None,

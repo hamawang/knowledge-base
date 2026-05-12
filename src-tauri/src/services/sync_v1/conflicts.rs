@@ -232,7 +232,9 @@ pub fn resolve_conflict(
                     )?;
                 }
                 None => {
-                    // 本地已删 → 用远端 UUID 重建（保持多端 ID 稳定）
+                    // 本地已删 → 用远端 UUID 重建（保持多端 ID 稳定）。
+                    // 冲突 .md 不携带 is_daily 信息 → 暂建为普通笔记；若它实为日记，下次
+                    // get_or_create_daily 会按标题兜底认领，不会重复新建。
                     db.create_note_with_uuid(
                         &NoteInput {
                             title,
@@ -240,6 +242,8 @@ pub fn resolve_conflict(
                             folder_id: None,
                         },
                         &stable_id,
+                        false,
+                        None,
                     )?;
                 }
             }
@@ -263,6 +267,7 @@ pub fn resolve_conflict(
                 }
                 None => {
                     // 本地已删，但用户手动合并了 → 用远端标题 + 合并正文重建
+                    // （同上：暂建为普通笔记，日记由 get_or_create_daily 兜底认领）
                     let (title, _) = parse_remote_md(&remote_body, &stable_id);
                     db.create_note_with_uuid(
                         &NoteInput {
@@ -271,6 +276,8 @@ pub fn resolve_conflict(
                             folder_id: None,
                         },
                         &stable_id,
+                        false,
+                        None,
                     )?;
                 }
             }

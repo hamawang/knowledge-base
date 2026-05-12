@@ -979,6 +979,10 @@ export interface ManifestEntry {
   remotePath: string;
   tombstone: boolean;
   folderPath: string;
+  /** 是否每日笔记（旧 manifest 无此字段；修复日记跨端重复 bug 时加入） */
+  isDaily?: boolean;
+  /** 每日笔记的日期 YYYY-MM-DD（isDaily=true 时有值） */
+  dailyDate?: string | null;
 }
 
 export interface SyncManifestV1 {
