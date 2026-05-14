@@ -4,5 +4,4 @@
 
 [features]
 # 启用 hooks 系统：加载 .codex/hooks.json 中的事件处理器
-# 0.124.0+ 已 stable，0.123 之前需配合 `codex --enable codex_hooks` 启动
-codex_hooks = true
+hooks = true
