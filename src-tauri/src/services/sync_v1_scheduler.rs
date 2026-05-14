@@ -117,20 +117,23 @@ async fn run_backend_sync(app: &AppHandle, backend_id: i64) {
 
     // 先 pull
     let pull_app = app.clone();
-    let pull_outcome: Result<String, String> =
+    let pull_outcome: Result<(String, usize), String> =
         tauri::async_runtime::spawn_blocking(move || run_pull_blocking(&pull_app, backend_id))
             .await
             .unwrap_or_else(|e| Err(format!("pull task panic: {}", e)));
 
-    if let Err(e) = &pull_outcome {
-        log::warn!(
-            "[sync-v1-scheduler] backend #{} pull 失败: {}（跳过 push，等下个周期）",
-            backend_id,
-            e
-        );
-        emit_result(app, backend_id, false, Some(format!("pull 失败: {}", e)));
-        return;
-    }
+    let encrypted_skipped = match &pull_outcome {
+        Ok((_, n)) => *n,
+        Err(e) => {
+            log::warn!(
+                "[sync-v1-scheduler] backend #{} pull 失败: {}（跳过 push，等下个周期）",
+                backend_id,
+                e
+            );
+            emit_result(app, backend_id, false, Some(format!("pull 失败: {}", e)), 0);
+            return;
+        }
+    };
 
     // pull 成功才 push（否则可能把过期数据推给远端）
     let push_app = app.clone();
@@ -146,7 +149,7 @@ async fn run_backend_sync(app: &AppHandle, backend_id: i64) {
                 backend_id,
                 summary
             );
-            emit_result(app, backend_id, true, None);
+            emit_result(app, backend_id, true, None, encrypted_skipped);
         }
         Err(e) => {
             log::warn!(
@@ -154,13 +157,22 @@ async fn run_backend_sync(app: &AppHandle, backend_id: i64) {
                 backend_id,
                 e
             );
-            emit_result(app, backend_id, false, Some(format!("push 失败: {}", e)));
+            emit_result(
+                app,
+                backend_id,
+                false,
+                Some(format!("push 失败: {}", e)),
+                encrypted_skipped,
+            );
         }
     }
 }
 
 /// 同步阻塞 pull：在 spawn_blocking 上下文里运行，可安全调用 sync_v1::pull
-fn run_pull_blocking(app: &AppHandle, backend_id: i64) -> Result<String, String> {
+///
+/// 返回 `(摘要, encrypted_skipped)` —— 后者透传给 emit_result，让前端能在后台同步完成后
+/// 弹"X 篇加密笔记未同步"提示（见 SyncPullResult.encrypted_skipped）。
+fn run_pull_blocking(app: &AppHandle, backend_id: i64) -> Result<(String, usize), String> {
     let state = app.state::<AppState>();
     let cfg = state
         .db
@@ -191,10 +203,11 @@ fn run_pull_blocking(app: &AppHandle, backend_id: i64) -> Result<String, String>
         app, // AppHandle 自身实现 Emitter
     )
     .map_err(|e| e.to_string())?;
-    Ok(format!(
+    let summary = format!(
         "下载 {} / 删本地 {} / 冲突 {}",
         r.downloaded, r.deleted_local, r.conflicts
-    ))
+    );
+    Ok((summary, r.encrypted_skipped))
 }
 
 /// 同步阻塞 push
@@ -231,11 +244,20 @@ fn run_push_blocking(app: &AppHandle, backend_id: i64) -> Result<String, String>
 }
 
 /// emit 同步结果给前端（设置页 SyncV1Section 监听，失败时弹 toast 提示）
-fn emit_result(app: &AppHandle, backend_id: i64, ok: bool, error: Option<String>) {
+///
+/// `encrypted_skipped` >0 时前端会弹"X 篇加密笔记未同步"提示（vault salt/密码不一致）。
+fn emit_result(
+    app: &AppHandle,
+    backend_id: i64,
+    ok: bool,
+    error: Option<String>,
+    encrypted_skipped: usize,
+) {
     let payload = serde_json::json!({
         "backendId": backend_id,
         "ok": ok,
         "error": error,
+        "encryptedSkipped": encrypted_skipped,
     });
     let _ = app.emit("sync_v1:auto-triggered", payload);
 }

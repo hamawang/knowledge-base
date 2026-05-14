@@ -243,21 +243,30 @@ export function SyncV1Section() {
     };
   }, []);
 
-  // 自动同步结果通知：成功不打扰（仅刷新列表更新 last_*_ts 显示），失败弹 toast
+  // 自动同步结果通知：成功不打扰（仅刷新列表更新 last_*_ts 显示），失败弹 toast；
+  // encryptedSkipped>0（vault meta 不匹配 → 加密笔记被静默跳过）显式告知用户避免误以为同步了
   useEffect(() => {
     let unlisten: UnlistenFn | undefined;
-    void listen<{ backendId: number; ok: boolean; error?: string | null }>(
-      "sync_v1:auto-triggered",
-      (e) => {
-        const { ok, error, backendId } = e.payload;
-        if (ok) {
-          void loadBackends();
-          void loadConflictCount();
-        } else {
-          message.warning(`自动同步失败 (backend #${backendId})：${error ?? "未知错误"}`);
-        }
-      },
-    ).then((u) => {
+    void listen<{
+      backendId: number;
+      ok: boolean;
+      error?: string | null;
+      encryptedSkipped?: number;
+    }>("sync_v1:auto-triggered", (e) => {
+      const { ok, error, backendId, encryptedSkipped } = e.payload;
+      if (ok) {
+        void loadBackends();
+        void loadConflictCount();
+      } else {
+        message.warning(`自动同步失败 (backend #${backendId})：${error ?? "未知错误"}`);
+      }
+      if ((encryptedSkipped ?? 0) > 0) {
+        message.warning(
+          `${encryptedSkipped} 篇加密笔记未同步：本机 vault 与远端不匹配（密码 / salt 不一致）`,
+          6,
+        );
+      }
+    }).then((u) => {
       unlisten = u;
     });
     return () => {
@@ -474,6 +483,14 @@ export function SyncV1Section() {
         });
       } else {
         message.success(msg);
+      }
+      // 加密笔记被静默跳过 → 显式告知（两端 vault salt/密码不一致时常见）
+      if ((r.encryptedSkipped ?? 0) > 0) {
+        modal.warning({
+          title: `${r.encryptedSkipped} 篇加密笔记未同步`,
+          content:
+            '本机 vault（加密保险库）与远端不匹配 — 多半是两端用了不同的主密码或还没在本机解锁。请确认两端 vault 用的是同一密码、且已解锁；若是新设备，需先在保险库里"导入远端配置"或用同一密码重建 vault。',
+        });
       }
       void loadBackends();
       void loadConflictCount();

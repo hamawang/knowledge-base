@@ -593,13 +593,19 @@ export interface WordExportResult {
   filePath: string;
   imagesEmbedded: number;
   imagesMissing: number;
+  /** 拷贝到 `<docx 同名>.attachments/` 旁挂目录里的非图片附件数 */
+  attachmentsCopied: number;
 }
 
-/** T-020 HTML 导出结果（单文件，图片内嵌） */
+/** T-020 HTML 导出结果（单文件，图片 + 非图片附件均内嵌） */
 export interface HtmlExportResult {
   filePath: string;
   imagesInlined: number;
   imagesMissing: number;
+  /** 内嵌为 data: 下载链接的非图片附件数 */
+  attachmentsInlined: number;
+  /** 解析失败的附件链接数 */
+  attachmentsMissing: number;
 }
 
 /** 导出进度 */
@@ -619,6 +625,17 @@ export interface DashboardStats {
   total_links: number;
   today_updated: number;
   total_words: number;
+}
+
+// ─── 日记中心 ─────────────────────────────────
+
+/** 日记列表项（前端按年月分组渲染用） */
+export interface DailyEntry {
+  id: number;
+  title: string;
+  /** YYYY-MM-DD */
+  daily_date: string;
+  updated_at: string;
 }
 
 // ─── 写作趋势 ─────────────────────────────────
@@ -1012,6 +1029,12 @@ export interface SyncPullResult {
   conflicts: number;
   /** T-S024: 下载的附件数（远端 manifest 列了但本机没有的） */
   attachmentsDownloaded?: number;
+  /**
+   * 因 vault meta 不匹配 / 缺失而被跳过的加密笔记数。
+   * >0 时前端弹提示告知用户（避免"加密笔记看着同步了实则被静默跳过"）。
+   * 旧后端无此字段 → undefined，按 0 处理。
+   */
+  encryptedSkipped?: number;
   errors: string[];
 }
 

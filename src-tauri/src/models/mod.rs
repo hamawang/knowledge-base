@@ -508,6 +508,18 @@ pub struct ExportProgress {
     pub file_name: String,
 }
 
+// ─── 日记中心 ─────────────────────────────────
+
+/// 日记列表项（平铺，前端按 year/month 分组渲染）
+#[derive(Debug, Clone, Serialize)]
+pub struct DailyEntry {
+    pub id: i64,
+    pub title: String,
+    /// YYYY-MM-DD
+    pub daily_date: String,
+    pub updated_at: String,
+}
+
 // ─── 写作趋势 ─────────────────────────────────
 
 /// 每日写作统计
@@ -1415,6 +1427,11 @@ pub struct SyncPullResult {
     pub conflicts: usize,
     /// T-S024: 下载的附件数（远端 manifest 列了但本机没有的）
     pub attachments_downloaded: usize,
+    /// 因 vault meta 不匹配 / 缺失而**跳过**的加密笔记数。
+    /// 用于让前端在两端 vault salt 不一致时给用户提示，避免"加密笔记看着同步了实则被静默跳过"。
+    /// 旧客户端无此字段反序列化 → 0；前端展示为 0 时不弹提示，>0 时显式告知用户。
+    #[serde(default)]
+    pub encrypted_skipped: usize,
     /// 错误清单
     pub errors: Vec<String>,
 }

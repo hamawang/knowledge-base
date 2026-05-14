@@ -247,6 +247,9 @@ pub fn pull<R: Runtime, E: Emitter<R>>(
         // T-S014：加密笔记走密文 upsert 分支
         if entry.encrypted {
             if !remote_vault_compatible {
+                // 计入 encrypted_skipped 让前端给用户弹提示（之前只 warn 日志，用户毫无感知 →
+                // 误以为加密笔记也同步了，实则被静默跳过 / 多端 vault salt 不一致永远互不可见）
+                result.encrypted_skipped += 1;
                 log::warn!(
                     "[sync_v1] 跳过加密笔记 {}（vault meta 不匹配或缺失）",
                     entry.title
