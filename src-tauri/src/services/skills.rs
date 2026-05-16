@@ -130,23 +130,32 @@ pub fn dispatch(db: &Database, name: &str, args_json: &str) -> Result<String, Ap
     Ok(truncate(&result, SKILL_RESULT_MAX_CHARS))
 }
 
-// ─── MCP 集成（M5-3）：把所有 enabled 外部 MCP server 的工具注入到 ai 对话 ─
+// ─── MCP 集成：把内置 kb-core 工具 + 外部 MCP server 的工具注入到 ai 对话 ─
 
-/// MCP 工具命名前缀。完整工具名 = `mcp__<server_id>__<tool_name>`。
+/// 外部 MCP 子进程工具命名前缀。完整工具名 = `mcp__<server_id>__<tool_name>`。
 /// 用 server_id 而非 name 是因为 OpenAI tool name 规范严格（`^[a-zA-Z0-9_-]{1,64}$`），
 /// server name 可能含中文/空格，避免做 sanitize 转换。
 const MCP_TOOL_PREFIX: &str = "mcp__";
 
-/// 按 OpenAI tools 格式返回所有可用工具：内置 5 skills + 所有 enabled 外部 MCP 工具
+/// 内置 kb-core 工具命名前缀。完整工具名 = `kb__<tool_name>`。
+/// 加前缀是为了：
+///   1) 与 5 个高层 skills（search_notes 等）做名字隔离，避免重名
+///   2) dispatch 时一眼能看出走 in-memory MCP 路径而不是 5 skills 的 db 直连
+const KB_TOOL_PREFIX: &str = "kb__";
+
+/// 按 OpenAI tools 格式返回所有可用工具：
+///   - 5 个高层内置 skills（直接 db 调用，最快）
+///   - 内置 kb-core 工具（in-memory MCP，前缀 `kb__`，含 11 个写工具）
+///   - 所有 enabled 外部 MCP server 的工具（仅桌面端，前缀 `mcp__<id>__`）
+///
+/// 写工具拦截在 dispatch 入口做，list 阶段全量暴露 schema —— 模型能"看到"自己有能力，
+/// 关掉「AI 写权限」开关时调用才会被拒；这样模型才会主动尝试写操作并把拦截信息反馈给用户。
 ///
 /// 失败的 server（spawn 失败 / 握手失败 / list_tools 失败）只 log warn，
 /// 不阻塞 ai 对话流；用户在设置页应该会看到 server 状态。
-/// 桌面端：内置 5 + 外部 MCP；移动端：仅内置 5（没有外部 MCP server 子进程能力）
-#[cfg(desktop)]
 pub async fn tool_schemas_with_mcp(app: &AppHandle) -> Vec<Value> {
-    let mut schemas = tool_schemas(); // 原 5 个内置 skills
+    let mut schemas = tool_schemas(); // 5 个高层内置 skills
 
-    // 取 AppState（chat_stream_with_skills 已经持有 AppHandle）
     let state = match app.try_state::<AppState>() {
         Some(s) => s,
         None => {
@@ -155,86 +164,132 @@ pub async fn tool_schemas_with_mcp(app: &AppHandle) -> Vec<Value> {
         }
     };
 
-    // 列所有 enabled 外部 MCP server
-    let servers = match state.db.list_mcp_servers() {
-        Ok(list) => list.into_iter().filter(|s| s.enabled).collect::<Vec<_>>(),
-        Err(e) => {
-            log::warn!("[ai-mcp] list_mcp_servers 失败: {e}");
-            return schemas;
-        }
-    };
-
-    for server in servers {
-        let client = match state.mcp_external.get_or_spawn(&server).await {
-            Ok(c) => c,
-            Err(e) => {
-                log::warn!(
-                    "[ai-mcp] spawn server '{}' (id={}) 失败: {}; skip",
-                    server.name,
-                    server.id,
-                    e
-                );
-                continue;
-            }
-        };
-        let tools = match client.list_all_tools().await {
-            Ok(t) => t,
-            Err(e) => {
-                log::warn!(
-                    "[ai-mcp] list_tools '{}' (id={}) 失败: {}; skip",
-                    server.name,
-                    server.id,
-                    e
-                );
-                continue;
-            }
-        };
-
-        for t in tools {
-            let prefixed_name = format!("{}{}__{}", MCP_TOOL_PREFIX, server.id, t.name.as_ref());
-            // OpenAI tool name 规范：64 字符 + 限定字符。截断保险一下
-            let safe_name = if prefixed_name.len() > 64 {
-                prefixed_name.chars().take(64).collect::<String>()
-            } else {
-                prefixed_name
-            };
-            let desc = format!(
-                "[MCP/{}] {}",
-                server.name,
-                t.description.as_deref().unwrap_or("(无说明)")
-            );
-            schemas.push(json!({
-                "type": "function",
-                "function": {
-                    "name": safe_name,
-                    "description": desc,
-                    "parameters": *t.input_schema,
+    // ─── 内置 kb-core 工具（桌面 + 移动都暴露） ─────────
+    // 5 个高层 skills 已有的名字直接跳过（search_notes / get_note / list_tags 等），
+    // 避免 LLM 看到两套近似工具时来回纠结
+    if let Some(client) = state.mcp_internal.as_ref().cloned() {
+        match client.list_all_tools().await {
+            Ok(tools) => {
+                let builtin_names: std::collections::HashSet<&str> =
+                    known_skill_names().iter().copied().collect();
+                for t in tools {
+                    let raw_name: &str = t.name.as_ref();
+                    if builtin_names.contains(raw_name) {
+                        continue;
+                    }
+                    let prefixed_name = format!("{}{}", KB_TOOL_PREFIX, raw_name);
+                    let safe_name = if prefixed_name.len() > 64 {
+                        prefixed_name.chars().take(64).collect::<String>()
+                    } else {
+                        prefixed_name
+                    };
+                    let desc = t
+                        .description
+                        .as_deref()
+                        .unwrap_or("(无说明)")
+                        .to_string();
+                    schemas.push(json!({
+                        "type": "function",
+                        "function": {
+                            "name": safe_name,
+                            "description": desc,
+                            "parameters": *t.input_schema,
+                        }
+                    }));
                 }
-            }));
+            }
+            Err(e) => {
+                log::warn!("[ai-mcp] list kb-core tools 失败: {e}; skip kb__* schemas");
+            }
+        }
+    } else {
+        log::warn!("[ai-mcp] state.mcp_internal 未就绪，跳过 kb__* schemas");
+    }
+
+    // ─── 外部 MCP server 工具（仅桌面端） ─────────
+    #[cfg(desktop)]
+    {
+        let servers = match state.db.list_mcp_servers() {
+            Ok(list) => list.into_iter().filter(|s| s.enabled).collect::<Vec<_>>(),
+            Err(e) => {
+                log::warn!("[ai-mcp] list_mcp_servers 失败: {e}");
+                return schemas;
+            }
+        };
+
+        for server in servers {
+            let client = match state.mcp_external.get_or_spawn(&server).await {
+                Ok(c) => c,
+                Err(e) => {
+                    log::warn!(
+                        "[ai-mcp] spawn server '{}' (id={}) 失败: {}; skip",
+                        server.name,
+                        server.id,
+                        e
+                    );
+                    continue;
+                }
+            };
+            let tools = match client.list_all_tools().await {
+                Ok(t) => t,
+                Err(e) => {
+                    log::warn!(
+                        "[ai-mcp] list_tools '{}' (id={}) 失败: {}; skip",
+                        server.name,
+                        server.id,
+                        e
+                    );
+                    continue;
+                }
+            };
+
+            for t in tools {
+                let prefixed_name =
+                    format!("{}{}__{}", MCP_TOOL_PREFIX, server.id, t.name.as_ref());
+                // OpenAI tool name 规范：64 字符 + 限定字符。截断保险一下
+                let safe_name = if prefixed_name.len() > 64 {
+                    prefixed_name.chars().take(64).collect::<String>()
+                } else {
+                    prefixed_name
+                };
+                let desc = format!(
+                    "[MCP/{}] {}",
+                    server.name,
+                    t.description.as_deref().unwrap_or("(无说明)")
+                );
+                schemas.push(json!({
+                    "type": "function",
+                    "function": {
+                        "name": safe_name,
+                        "description": desc,
+                        "parameters": *t.input_schema,
+                    }
+                }));
+            }
         }
     }
 
     schemas
 }
 
-/// 移动端：仅返回内置 5 skills（无外部 MCP server）
-#[cfg(mobile)]
-pub async fn tool_schemas_with_mcp(_app: &AppHandle) -> Vec<Value> {
-    tool_schemas()
-}
-
 /// dispatch 增强版：按工具名前缀路由
-/// - `mcp__<id>__<name>` 走 mcp_external client（仅桌面端）
-/// - 其他名字走原 dispatch（5 个内置 skills）
+/// - `kb__<name>` 走 in-memory MCP client（kb-core 工具，桌面+移动都支持）
+/// - `mcp__<id>__<name>` 走 mcp_external client（外部 MCP 子进程，仅桌面端）
+/// - 其他名字走原 dispatch（5 个高层内置 skills）
 pub async fn dispatch_with_mcp(
     app: &AppHandle,
     db: &Database,
     name: &str,
     args_json: &str,
 ) -> Result<String, AppError> {
+    // kb__ 前缀（内置 kb-core 工具）—— 写权限在 dispatch_kb_internal 里拦截
+    if let Some(suffix) = name.strip_prefix(KB_TOOL_PREFIX) {
+        return dispatch_kb_internal(app, suffix, args_json).await;
+    }
+
+    // mcp__<id>__<name> 前缀（外部 MCP 子进程）—— 仅桌面端
     #[cfg(desktop)]
     if let Some(suffix) = name.strip_prefix(MCP_TOOL_PREFIX) {
-        // 拆 <id>__<tool>
         let (id_str, tool_name) = suffix.split_once("__").ok_or_else(|| {
             AppError::Custom(format!(
                 "MCP 工具名格式错误: {}（应为 mcp__<id>__<name>）",
@@ -247,10 +302,72 @@ pub async fn dispatch_with_mcp(
         return dispatch_mcp(app, server_id, tool_name, args_json).await;
     }
     #[cfg(mobile)]
-    let _ = app; // 移动端避免未使用警告
-    // 原 5 个内置 skills 走 sync 版
-    // 移动端：mcp__ 前缀的工具名也直接交给 dispatch（会返回 unknown tool 错误）
+    let _ = app; // 移动端避免未使用警告（仅当也不走 kb__ 分支时）
+
+    // 5 个高层内置 skills（无前缀）
     dispatch(db, name, args_json)
+}
+
+/// 走 in-memory MCP client 调用 kb-core 工具，写工具走相同拦截门
+async fn dispatch_kb_internal(
+    app: &AppHandle,
+    tool_name: &str,
+    args_json: &str,
+) -> Result<String, AppError> {
+    let state = app
+        .try_state::<AppState>()
+        .ok_or_else(|| AppError::Custom("AppState 未就绪".into()))?;
+
+    // 写工具拦截：与 commands::mcp::mcp_internal_call_tool 共享同一份名单 + 同一份开关
+    // —— AI 对话路径绕过了那个 Command，所以在这儿要单独再拦一次
+    if crate::commands::mcp::is_kb_write_tool(tool_name)
+        && !crate::commands::mcp::read_ai_writable(&state)
+    {
+        return Err(AppError::Custom(format!(
+            "AI 写权限已关闭。要让 AI 修改你的知识库，请到 设置 → MCP 服务器 \
+             或 AI 问答页顶部 打开「AI 写权限」开关。被拦截的工具：{tool_name}"
+        )));
+    }
+
+    let client = state
+        .mcp_internal
+        .as_ref()
+        .ok_or_else(|| AppError::Custom("in-memory MCP server 未就绪".into()))?
+        .clone();
+
+    // 解析 args_json 为 JsonObject（rmcp call_tool 要求 Map<String, Value>）
+    let args_value: Value = serde_json::from_str(args_json).unwrap_or(Value::Null);
+    let args_object = match args_value {
+        Value::Object(m) => Some(m),
+        Value::Null => None,
+        other => {
+            return Err(AppError::Custom(format!(
+                "kb__ 工具参数应为 JSON object，收到: {}",
+                other
+            )));
+        }
+    };
+
+    let mut req = CallToolRequestParams::new(tool_name.to_string());
+    if let Some(obj) = args_object {
+        req = req.with_arguments(obj);
+    }
+
+    let result = client
+        .call_tool(req)
+        .await
+        .map_err(|e| AppError::Custom(format!("call_tool({tool_name}) 失败: {e}")))?;
+
+    let mut out = String::new();
+    for c in &result.content {
+        if let Some(text) = c.as_text() {
+            out.push_str(&text.text);
+        }
+    }
+    if result.is_error.unwrap_or(false) {
+        return Err(AppError::Custom(format!("MCP 工具返回错误: {out}")));
+    }
+    Ok(truncate(&out, SKILL_RESULT_MAX_CHARS))
 }
 
 #[cfg(desktop)]

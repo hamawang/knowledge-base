@@ -45,12 +45,15 @@ const KB_WRITE_TOOLS: &[&str] = &[
     "remove_tag_from_note",
 ];
 
-fn is_kb_write_tool(name: &str) -> bool {
+/// 是否是 kb-core 11 个写工具之一。
+/// 暴露给 `services::skills::dispatch_kb_internal` 共用同一份名单。
+pub(crate) fn is_kb_write_tool(name: &str) -> bool {
     KB_WRITE_TOOLS.contains(&name)
 }
 
-/// 读 app_config 里的 ai_writable 标志，缺失/解析失败按 true 处理（向后兼容）
-fn read_ai_writable(state: &AppState) -> bool {
+/// 读 app_config 里的 ai_writable 标志，缺失/解析失败按 true 处理（向后兼容）。
+/// 暴露给 `services::skills::dispatch_kb_internal` 在 AI 对话路径上同样拦截写工具。
+pub(crate) fn read_ai_writable(state: &AppState) -> bool {
     match state.db.get_config(AI_WRITABLE_KEY) {
         Ok(Some(v)) => v != "0",
         _ => true,
