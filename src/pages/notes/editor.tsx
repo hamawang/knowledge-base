@@ -54,9 +54,36 @@ const CURRENT_WINDOW_LABEL = (() => {
 })();
 const IS_POPOUT_WINDOW = CURRENT_WINDOW_LABEL.startsWith("popout-");
 
-/** 从 HTML 内容中提取 [[笔记标题]] 链接 */
-function extractWikiLinks(html: string): string[] {
-  const text = stripHtml(html);
+/** 去 markdown 转义：把 `\X`（X 为非字母数字）中的 `\` 丢弃。
+ *
+ * 与 Rust 侧 `database/links.rs::unescape_md` **对齐**，二者必须同步演进。
+ * 用途：Tiptap markdown 序列化（尤其在 TaskItem 里）会把 `[[Title]]` 写成
+ * `\[\[Title\]\]`、`[[A_B]]` 写成 `[[A\_B]]`，不反转义就匹配不到 wiki-link。
+ * 保留 `\n` 等真正的字母转义不变（避免误伤代码块/正则字面量）。
+ */
+function unescapeMd(s: string): string {
+  let out = "";
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === "\\" && i + 1 < s.length) {
+      const next = s[i + 1];
+      // 非字母数字（含中日韩等 unicode 字母）→ 吃掉 `\`，保留下一个字符
+      // 用正则替代 isAlphanumeric，覆盖 unicode（Markdown 转义只对 ASCII 标点生效，
+      // 中文不会被转义，所以 \[ \( \* 这类是关键场景）
+      if (!/[A-Za-z0-9]/.test(next)) {
+        out += next;
+        i++;
+        continue;
+      }
+    }
+    out += s[i];
+  }
+  return out;
+}
+
+/** 从 HTML / Markdown 内容中提取 [[笔记标题]] 链接（带 markdown 反转义） */
+function extractWikiLinks(content: string): string[] {
+  // 先 stripHtml（兼容 HTML），再 unescapeMd（兼容 markdown 序列化形式）
+  const text = unescapeMd(stripHtml(content));
   const regex = /\[\[([^\]]+)\]\]/g;
   const titles: string[] = [];
   let match;

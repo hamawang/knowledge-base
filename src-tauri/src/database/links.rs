@@ -273,3 +273,57 @@ impl super::Database {
         Ok(GraphData { nodes, edges })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unescape_md_drops_backslash_before_punctuation() {
+        // 转义的标点：吃掉反斜杠
+        assert_eq!(unescape_md(r"\[\[Note\]\]"), "[[Note]]");
+        assert_eq!(unescape_md(r"\*emph\*"), "*emph*");
+        assert_eq!(unescape_md(r"A\_B"), "A_B");
+    }
+
+    #[test]
+    fn unescape_md_keeps_letter_escapes() {
+        // \n / \t 这种字母转义：保留原样（不丢 \）
+        assert_eq!(unescape_md(r"line\nbreak"), r"line\nbreak");
+        assert_eq!(unescape_md(r"col\tsep"), r"col\tsep");
+    }
+
+    #[test]
+    fn extract_wiki_titles_basic() {
+        let titles = extract_wiki_titles("正文 [[A]] 中间 [[B]] 末尾");
+        assert_eq!(titles, vec!["A".to_string(), "B".to_string()]);
+    }
+
+    #[test]
+    fn extract_wiki_titles_handles_escaped_brackets() {
+        // 核心回归点：TaskItem 序列化 markdown 时把 [[X]] 写成 \[\[X\]\]
+        // 修复前会扫不到任何 wiki-link，反链整体失效
+        let titles = extract_wiki_titles(r"<p>任务 \[\[测试2\]\] 完成</p>");
+        assert_eq!(titles, vec!["测试2".to_string()]);
+    }
+
+    #[test]
+    fn extract_wiki_titles_handles_escaped_underscore_inside() {
+        // 标题里有 _ 时，markdown 会转义成 \_
+        let titles = extract_wiki_titles(r"<p>查看 [[A\_B]]</p>");
+        assert_eq!(titles, vec!["A_B".to_string()]);
+    }
+
+    #[test]
+    fn extract_wiki_titles_dedupes() {
+        let titles = extract_wiki_titles("[[A]] [[A]] [[B]] [[A]]");
+        assert_eq!(titles, vec!["A".to_string(), "B".to_string()]);
+    }
+
+    #[test]
+    fn extract_wiki_titles_skips_unclosed() {
+        // 未配对的 [[ 不应卡死或误识别
+        let titles = extract_wiki_titles("正文 [[unclosed 后续");
+        assert!(titles.is_empty());
+    }
+}
