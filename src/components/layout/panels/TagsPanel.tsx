@@ -5,15 +5,18 @@ import {
   Modal,
   Form,
   Input,
+  Tree,
   message,
   theme as antdTheme,
 } from "antd";
+import type { DataNode } from "antd/es/tree";
 import {
   Plus,
   Tags as TagsIcon,
   Check,
   Edit3,
   Trash2,
+  FolderUp,
 } from "lucide-react";
 import { tagApi } from "@/lib/api";
 import { useAppStore } from "@/store";
@@ -29,10 +32,16 @@ import {
 /**
  * TagsPanel —— Activity Bar 模式下"标签"视图的主面板。
  *
- * 交互：
- *   · 单击 标签条目 → 选中 + 跳 /tags?tagId=...
- *   · 双击 标签条目 → 进入 inline 重命名（Enter 提交 / Esc 取消）
- *   · 右键 标签条目 → 菜单（重命名 / 颜色色板 inline / 删除）
+ * v1.11 引入树形标签（parent_id）。本组件用 antd `<Tree>` 渲染层级，
+ * 通过 `titleRender` 保留原有行内交互（inline 重命名 / 右键菜单 / 颜色色板）。
+ *
+ * 交互（与扁平版一致 + 拖拽）：
+ *   · 单击 标签 → 选中 + 跳 /tags?tagId=...
+ *   · 双击 标签 → 进入 inline 重命名（Enter 提交 / Esc 取消）
+ *   · 右键 标签 → 菜单（重命名 / 颜色色板 / "提升为顶层" / 删除）
+ *   · 拖拽 标签 → 改变父子关系（拖到节点上=作为子；拖到节点之间=作为兄弟）
+ *
+ * 删除父标签时，子标签**自动提升为顶层**（不会跟着删，避免误删）。
  */
 export function TagsPanel() {
   const navigate = useNavigate();
@@ -50,6 +59,7 @@ export function TagsPanel() {
   const [filter, setFilter] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
   const [form] = Form.useForm<{ name: string; color: string }>();
+  const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
 
   // ─── Inline 重命名状态 ────────────────────────
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -70,11 +80,18 @@ export function TagsPanel() {
     }
   }
 
-  const filtered = useMemo(() => {
-    const q = filter.trim().toLowerCase();
-    if (!q) return tags;
-    return tags.filter((t) => t.name.toLowerCase().includes(q));
-  }, [tags, filter]);
+  // 按 name 过滤；过滤命中节点的所有祖先必须同时展开，否则用户看不到
+  const { filteredTreeData, autoExpandKeys } = useMemo(
+    () => buildTreeData(tags, filter.trim().toLowerCase()),
+    [tags, filter],
+  );
+
+  // 筛选时自动展开命中节点的祖先链；清空筛选恢复用户原状态
+  useEffect(() => {
+    if (filter.trim()) {
+      setExpandedKeys((prev) => Array.from(new Set([...prev, ...autoExpandKeys])));
+    }
+  }, [filter, autoExpandKeys]);
 
   function handleSelect(tag: Tag) {
     if (editingId === tag.id) return; // 编辑态不响应点击
@@ -84,7 +101,6 @@ export function TagsPanel() {
   function startEdit(tag: Tag) {
     setEditingId(tag.id);
     setEditingName(tag.name);
-    // 等下一帧 input mount 后聚焦
     requestAnimationFrame(() => {
       editInputRef.current?.focus();
       editInputRef.current?.select();
@@ -106,7 +122,6 @@ export function TagsPanel() {
     const name = editingName.trim();
     if (!name) {
       message.warning("标签名不能为空");
-      // 不退出编辑态，让用户继续改
       return;
     }
     if (name === tag.name) {
@@ -135,10 +150,37 @@ export function TagsPanel() {
     }
   }
 
-  // ─── 右键菜单 ────────────────────────────────
-  const ctx = useContextMenu<{ id: number; name: string; color: string | null }>();
+  /** 标签拖拽放置：
+   * - dropToGap=false（落在节点上）→ 拖动项变为 dropNode 的子
+   * - dropToGap=true（落在节点之间）→ 拖动项变为 dropNode 的兄弟（共享 parent_id）
+   */
+  async function handleDrop(info: {
+    dragNode: { key: React.Key };
+    node: { key: React.Key };
+    dropToGap: boolean;
+  }) {
+    const dragId = Number(info.dragNode.key);
+    const dropId = Number(info.node.key);
+    const dropTag = tags.find((t) => t.id === dropId);
+    if (!dropTag) return;
+    const newParentId = info.dropToGap ? dropTag.parent_id : dropId;
+    if (newParentId === dragId) return; // 已经被 set_tag_parent 拒绝，但前端先省一次 IPC
+    try {
+      await tagApi.setParent(dragId, newParentId);
+      useAppStore.getState().bumpTagsRefresh();
+    } catch (e) {
+      message.error(`移动失败：${e}`);
+    }
+  }
 
-  /** 改色（菜单内嵌色板的 swatch click 直接调） */
+  // ─── 右键菜单 ────────────────────────────────
+  const ctx = useContextMenu<{
+    id: number;
+    name: string;
+    color: string | null;
+    parentId: number | null;
+  }>();
+
   async function setTagColor(id: number, color: string) {
     try {
       await tagApi.setColor(id, color);
@@ -148,10 +190,19 @@ export function TagsPanel() {
     }
   }
 
+  async function promoteToTop(id: number) {
+    try {
+      await tagApi.setParent(id, null);
+      useAppStore.getState().bumpTagsRefresh();
+    } catch (e) {
+      message.error(`提升失败：${e}`);
+    }
+  }
+
   const tagMenuItems: ContextMenuEntry[] = useMemo(() => {
     const p = ctx.state.payload;
     if (!p) return [];
-    return [
+    const items: ContextMenuEntry[] = [
       {
         key: "rename",
         label: "重命名",
@@ -162,6 +213,19 @@ export function TagsPanel() {
           if (tag) startEdit(tag);
         },
       },
+    ];
+    if (p.parentId != null) {
+      items.push({
+        key: "promote",
+        label: "提升为顶层",
+        icon: <FolderUp size={13} />,
+        onClick: () => {
+          ctx.close();
+          void promoteToTop(p.id);
+        },
+      });
+    }
+    items.push(
       { type: "divider" },
       {
         key: "color-grid",
@@ -192,7 +256,8 @@ export function TagsPanel() {
               }}
             >
               {TAG_COLORS.map((c) => {
-                const isSelected = (p.color || "").toLowerCase() === c.toLowerCase();
+                const isSelected =
+                  (p.color || "").toLowerCase() === c.toLowerCase();
                 return (
                   <button
                     key={c}
@@ -238,7 +303,7 @@ export function TagsPanel() {
           ctx.close();
           Modal.confirm({
             title: `删除标签「${p.name}」？`,
-            content: "删除标签不会删除关联的笔记。",
+            content: "子标签会自动提升为顶层（不会跟着删除）。已关联的笔记保留。",
             okText: "删除",
             okButtonProps: { danger: true },
             async onOk() {
@@ -254,15 +319,128 @@ export function TagsPanel() {
           });
         },
       },
-    ];
+    );
+    return items;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ctx, tags, selectedId, navigate, token]);
+
+  /** Tree titleRender：单行 = 色块 + 名称（inline 编辑切换）+ 计数 + active 勾 */
+  const renderTitle = (node: DataNode) => {
+    const tag = tags.find((t) => t.id === Number(node.key));
+    if (!tag) return null;
+    const active = selectedId === tag.id;
+    const ctxActive = ctx.state.payload?.id === tag.id;
+    const isEditing = editingId === tag.id;
+    return (
+      <div
+        onClick={(e) => {
+          if (isEditing) return;
+          e.stopPropagation(); // antd Tree 默认会触发 selectable=false 的 onSelect 不必要副作用
+          handleSelect(tag);
+        }}
+        onDoubleClick={(e) => {
+          e.stopPropagation();
+          startEdit(tag);
+        }}
+        onContextMenu={(e) => {
+          if (isEditing) return;
+          e.preventDefault();
+          e.stopPropagation();
+          ctx.open(e.nativeEvent, {
+            id: tag.id,
+            name: tag.name,
+            color: tag.color,
+            parentId: tag.parent_id,
+          });
+        }}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          padding: "2px 6px",
+          borderRadius: 4,
+          background: active ? `${token.colorPrimary}14` : "transparent",
+          color: active ? token.colorPrimary : token.colorText,
+          fontWeight: active ? 500 : undefined,
+          fontSize: 13,
+          outline: ctxActive ? `1px solid ${token.colorPrimary}` : "none",
+          outlineOffset: -1,
+          transition: "background .15s, outline .1s",
+          minHeight: 22,
+        }}
+      >
+        <span
+          aria-hidden
+          style={{
+            width: 10,
+            height: 10,
+            borderRadius: 3,
+            background: tag.color || token.colorTextQuaternary,
+            flexShrink: 0,
+            border: `1px solid ${token.colorBorderSecondary}`,
+          }}
+        />
+        {isEditing ? (
+          <input
+            ref={editInputRef}
+            value={editingName}
+            onChange={(e) => setEditingName(e.target.value)}
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                void submitEdit();
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                cancelEdit();
+              }
+            }}
+            onBlur={() => {
+              void submitEdit();
+            }}
+            style={{
+              flex: 1,
+              minWidth: 0,
+              border: `1px solid ${token.colorPrimary}`,
+              borderRadius: 3,
+              padding: "1px 6px",
+              fontSize: 13,
+              lineHeight: "18px",
+              outline: "none",
+              background: token.colorBgContainer,
+              color: token.colorText,
+            }}
+            maxLength={32}
+          />
+        ) : (
+          <span
+            className="truncate"
+            style={{ flex: 1, minWidth: 0 }}
+            title={tag.name}
+          >
+            {tag.name}
+          </span>
+        )}
+        {!isEditing && active && <Check size={12} strokeWidth={3} />}
+        {!isEditing && (
+          <span
+            style={{
+              fontSize: 11,
+              color: token.colorTextTertiary,
+              flexShrink: 0,
+            }}
+          >
+            {tag.note_count}
+          </span>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div
       className="flex flex-col h-full"
       style={{ overflow: "hidden" }}
-      // 顶层兜底吞 WebView 默认菜单。input/textarea 白名单，让搜索框右键
-      // 仍可用浏览器原生剪切/复制/粘贴
       onContextMenu={(e) => {
         const t = e.target as HTMLElement;
         if (t.closest("input, textarea, [contenteditable='true']")) return;
@@ -321,12 +499,12 @@ export function TagsPanel() {
         />
       </div>
 
-      {/* 标签列表 */}
+      {/* 标签树 */}
       <div
         className="flex-1 overflow-auto"
         style={{ minHeight: 0, padding: "2px 8px 8px" }}
       >
-        {filtered.length === 0 ? (
+        {filteredTreeData.length === 0 ? (
           <div
             className="text-center py-6"
             style={{ color: token.colorTextQuaternary, fontSize: 12 }}
@@ -351,109 +529,18 @@ export function TagsPanel() {
             )}
           </div>
         ) : (
-          filtered.map((tag) => {
-            const active = selectedId === tag.id;
-            const ctxActive = ctx.state.payload?.id === tag.id;
-            const isEditing = editingId === tag.id;
-            return (
-              <div
-                key={tag.id}
-                onClick={() => handleSelect(tag)}
-                onDoubleClick={(e) => {
-                  e.stopPropagation();
-                  startEdit(tag);
-                }}
-                onContextMenu={(e) => {
-                  if (isEditing) return; // 编辑态不弹菜单
-                  e.preventDefault();
-                  ctx.open(e.nativeEvent, {
-                    id: tag.id,
-                    name: tag.name,
-                    color: tag.color,
-                  });
-                }}
-                className={isEditing ? "" : "cursor-pointer"}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                  padding: "6px 10px",
-                  borderRadius: 6,
-                  background: active
-                    ? `${token.colorPrimary}14`
-                    : "transparent",
-                  color: active ? token.colorPrimary : token.colorText,
-                  fontWeight: active ? 500 : undefined,
-                  fontSize: 13,
-                  outline: ctxActive ? `1px solid ${token.colorPrimary}` : "none",
-                  outlineOffset: -1,
-                  transition: "background .15s, outline .1s",
-                }}
-              >
-                <span
-                  aria-hidden
-                  style={{
-                    width: 10,
-                    height: 10,
-                    borderRadius: 3,
-                    background: tag.color || token.colorTextQuaternary,
-                    flexShrink: 0,
-                    border: `1px solid ${token.colorBorderSecondary}`,
-                  }}
-                />
-                {isEditing ? (
-                  <input
-                    ref={editInputRef}
-                    value={editingName}
-                    onChange={(e) => setEditingName(e.target.value)}
-                    onClick={(e) => e.stopPropagation()}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        e.preventDefault();
-                        void submitEdit();
-                      } else if (e.key === "Escape") {
-                        e.preventDefault();
-                        cancelEdit();
-                      }
-                    }}
-                    onBlur={() => {
-                      // 失焦提交（与"Enter 提交"一致）；空值会保持编辑态
-                      void submitEdit();
-                    }}
-                    style={{
-                      flex: 1,
-                      minWidth: 0,
-                      border: `1px solid ${token.colorPrimary}`,
-                      borderRadius: 3,
-                      padding: "1px 6px",
-                      fontSize: 13,
-                      lineHeight: "18px",
-                      outline: "none",
-                      background: token.colorBgContainer,
-                      color: token.colorText,
-                    }}
-                    maxLength={32}
-                  />
-                ) : (
-                  <span className="truncate" style={{ flex: 1 }}>
-                    {tag.name}
-                  </span>
-                )}
-                {!isEditing && active && <Check size={12} strokeWidth={3} />}
-                {!isEditing && (
-                  <span
-                    style={{
-                      fontSize: 11,
-                      color: token.colorTextTertiary,
-                      flexShrink: 0,
-                    }}
-                  >
-                    {tag.note_count}
-                  </span>
-                )}
-              </div>
-            );
-          })
+          <Tree
+            treeData={filteredTreeData}
+            titleRender={renderTitle}
+            draggable={{ icon: false }}
+            blockNode
+            selectable={false}
+            expandedKeys={expandedKeys}
+            onExpand={(keys) => setExpandedKeys(keys.map(String))}
+            onDrop={handleDrop}
+            // antd Tree 默认会把每行 padding 弄得很宽，压缩一下
+            style={{ background: "transparent" }}
+          />
         )}
       </div>
 
@@ -482,7 +569,6 @@ export function TagsPanel() {
         </Form>
       </Modal>
 
-      {/* 标签右键菜单（重命名 / 颜色色板 inline / 删除） */}
       <ContextMenuOverlay
         open={!!ctx.state.payload}
         x={ctx.state.x}
@@ -492,4 +578,56 @@ export function TagsPanel() {
       />
     </div>
   );
+}
+
+/**
+ * 把扁平 Tag[] 组装成 antd Tree 的 DataNode[]，并按 filter 过滤。
+ *
+ * 过滤策略：节点 name 包含 filter（命中）或其任一后代命中 → 该节点出现在结果中。
+ * 同时返回所有命中节点的祖先 keys，供调用方自动展开。
+ *
+ * 孤儿处理：parent_id 指向不存在的 id（数据清理不全 / 父被删的旧数据）→ 当作顶层。
+ */
+function buildTreeData(
+  tags: Tag[],
+  filterLower: string,
+): { filteredTreeData: DataNode[]; autoExpandKeys: string[] } {
+  const byId = new Map<number, Tag>();
+  tags.forEach((t) => byId.set(t.id, t));
+  const childrenMap = new Map<number | null, Tag[]>();
+  for (const t of tags) {
+    const parent = t.parent_id != null && byId.has(t.parent_id) ? t.parent_id : null;
+    if (!childrenMap.has(parent)) childrenMap.set(parent, []);
+    childrenMap.get(parent)!.push(t);
+  }
+
+  const autoExpand = new Set<string>();
+
+  function build(tag: Tag, ancestors: string[]): DataNode | null {
+    const children = (childrenMap.get(tag.id) ?? [])
+      .map((c) => build(c, [...ancestors, String(tag.id)]))
+      .filter((n): n is DataNode => n != null);
+    const selfMatch =
+      !filterLower || tag.name.toLowerCase().includes(filterLower);
+    const hasChildHit = children.length > 0 && filterLower;
+    if (!selfMatch && !hasChildHit && filterLower) return null;
+    if (selfMatch && filterLower) {
+      // 自身命中：标记所有祖先要展开
+      ancestors.forEach((a) => autoExpand.add(a));
+    }
+    return {
+      key: String(tag.id),
+      title: tag.name, // 实际渲染走 titleRender
+      children: children.length > 0 ? children : undefined,
+    };
+  }
+
+  const roots = (childrenMap.get(null) ?? [])
+    .map((t) => build(t, []))
+    .filter((n): n is DataNode => n != null);
+
+  return {
+    filteredTreeData: roots,
+    autoExpandKeys: Array.from(autoExpand),
+  };
 }

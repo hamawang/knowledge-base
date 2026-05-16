@@ -2,14 +2,28 @@ use crate::models::{Note, PageResult, Tag};
 use crate::services::tag::TagService;
 use crate::state::AppState;
 
-/// 创建标签
+/// 创建标签（可选 parent_id：传 null/undefined 即创建顶层标签）
 #[tauri::command]
 pub fn create_tag(
     state: tauri::State<'_, AppState>,
     name: String,
     color: Option<String>,
+    parent_id: Option<i64>,
 ) -> Result<Tag, String> {
-    TagService::create(&state.db, &name, color.as_deref()).map_err(|e| e.to_string())
+    TagService::create(&state.db, &name, color.as_deref(), parent_id)
+        .map_err(|e| e.to_string())
+}
+
+/// 设置标签的父级（None = 提升为顶层）
+///
+/// 拒绝自引用和循环依赖（具体校验在 DAO 层用 `WITH RECURSIVE` 做）。
+#[tauri::command]
+pub fn set_tag_parent(
+    state: tauri::State<'_, AppState>,
+    id: i64,
+    parent_id: Option<i64>,
+) -> Result<(), String> {
+    TagService::set_parent(&state.db, id, parent_id).map_err(|e| e.to_string())
 }
 
 /// 获取所有标签

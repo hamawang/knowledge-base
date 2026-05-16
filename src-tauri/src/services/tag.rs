@@ -6,13 +6,27 @@ use crate::models::{Note, PageResult, Tag};
 pub struct TagService;
 
 impl TagService {
-    /// 创建标签
-    pub fn create(db: &Database, name: &str, color: Option<&str>) -> Result<Tag, AppError> {
+    /// 创建标签（可指定父标签 id 形成树形）
+    pub fn create(
+        db: &Database,
+        name: &str,
+        color: Option<&str>,
+        parent_id: Option<i64>,
+    ) -> Result<Tag, AppError> {
         let name = name.trim();
         if name.is_empty() {
             return Err(AppError::InvalidInput("标签名称不能为空".into()));
         }
-        db.create_tag(name, color)
+        db.create_tag(name, color, parent_id)
+    }
+
+    /// 移动标签到新父级（None = 提升为顶层）
+    pub fn set_parent(
+        db: &Database,
+        id: i64,
+        parent_id: Option<i64>,
+    ) -> Result<(), AppError> {
+        db.set_tag_parent(id, parent_id)
     }
 
     /// 获取所有标签

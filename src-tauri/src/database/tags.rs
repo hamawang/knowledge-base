@@ -8,16 +8,21 @@ use super::Database;
 impl Database {
     // ─── 标签 DAO ─────────────────────────────────
 
-    /// 创建标签
-    pub fn create_tag(&self, name: &str, color: Option<&str>) -> Result<Tag, AppError> {
+    /// 创建标签（可指定父标签 id 形成树形结构）
+    pub fn create_tag(
+        &self,
+        name: &str,
+        color: Option<&str>,
+        parent_id: Option<i64>,
+    ) -> Result<Tag, AppError> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| AppError::Custom(e.to_string()))?;
 
         conn.execute(
-            "INSERT INTO tags (name, color) VALUES (?1, ?2)",
-            params![name, color],
+            "INSERT INTO tags (name, color, parent_id) VALUES (?1, ?2, ?3)",
+            params![name, color, parent_id],
         )?;
 
         let id = conn.last_insert_rowid();
@@ -27,10 +32,14 @@ impl Database {
             name: name.to_string(),
             color: color.map(|c| c.to_string()),
             note_count: 0,
+            parent_id,
         })
     }
 
-    /// 获取所有标签（带笔记计数，按笔记数降序）
+    /// 获取所有标签（带笔记计数 + parent_id）
+    ///
+    /// 排序改为按 name 字母序：树形展示下"按热度排序"会破坏父子相邻关系。
+    /// 由前端在内存中重组成树（避免后端做递归 CTE，前端组装更灵活）。
     pub fn list_tags(&self) -> Result<Vec<Tag>, AppError> {
         let conn = self
             .conn
@@ -38,12 +47,12 @@ impl Database {
             .map_err(|e| AppError::Custom(e.to_string()))?;
 
         let mut stmt = conn.prepare(
-            "SELECT t.id, t.name, t.color, COUNT(nt.note_id) as note_count
+            "SELECT t.id, t.name, t.color, t.parent_id, COUNT(nt.note_id) as note_count
              FROM tags t
              LEFT JOIN note_tags nt ON t.id = nt.tag_id
              LEFT JOIN notes n ON nt.note_id = n.id AND n.is_deleted = 0
              GROUP BY t.id
-             ORDER BY note_count DESC, t.name",
+             ORDER BY t.name COLLATE NOCASE",
         )?;
 
         let tags = stmt
@@ -52,12 +61,73 @@ impl Database {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     color: row.get(2)?,
-                    note_count: row.get(3)?,
+                    parent_id: row.get(3)?,
+                    note_count: row.get(4)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(tags)
+    }
+
+    /// 设置标签的父标签（NULL = 提升为顶层）。
+    ///
+    /// 校验：
+    /// - 拒绝自引用（parent_id == id）
+    /// - 拒绝循环依赖（parent_id 是 id 的后代）
+    ///
+    /// 循环检查走 `WITH RECURSIVE` 一次性算完，避免 N+1。
+    pub fn set_tag_parent(&self, id: i64, parent_id: Option<i64>) -> Result<(), AppError> {
+        if let Some(pid) = parent_id {
+            if pid == id {
+                return Err(AppError::InvalidInput(
+                    "不能把标签设为它自己的父级".into(),
+                ));
+            }
+        }
+
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| AppError::Custom(e.to_string()))?;
+
+        // 循环检查：新父级不能是当前节点的后代。WITH RECURSIVE 从 id 向下展开所有后代 id，
+        // 看 parent_id 在不在里头。
+        if let Some(pid) = parent_id {
+            let is_descendant: bool = conn.query_row(
+                "WITH RECURSIVE descendants(id) AS (
+                    SELECT id FROM tags WHERE parent_id = ?1
+                    UNION ALL
+                    SELECT t.id FROM tags t JOIN descendants d ON t.parent_id = d.id
+                 )
+                 SELECT EXISTS(SELECT 1 FROM descendants WHERE id = ?2)",
+                params![id, pid],
+                |row| row.get::<_, i64>(0).map(|v| v != 0),
+            )?;
+            if is_descendant {
+                return Err(AppError::InvalidInput(
+                    "目标父标签是当前标签的子孙，会形成循环依赖".into(),
+                ));
+            }
+            // 父标签存在性校验
+            let exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM tags WHERE id = ?1)",
+                params![pid],
+                |row| row.get::<_, i64>(0).map(|v| v != 0),
+            )?;
+            if !exists {
+                return Err(AppError::NotFound(format!("父标签 {} 不存在", pid)));
+            }
+        }
+
+        let affected = conn.execute(
+            "UPDATE tags SET parent_id = ?1 WHERE id = ?2",
+            params![parent_id, id],
+        )?;
+        if affected == 0 {
+            return Err(AppError::NotFound(format!("标签 {} 不存在", id)));
+        }
+        Ok(())
     }
 
     /// 修改标签颜色（传 None 清空颜色走默认样式）
@@ -96,19 +166,29 @@ impl Database {
         Ok(())
     }
 
-    /// 删除标签（同时删除关联）
+    /// 删除标签（同时删除笔记关联；子标签提升为顶层而非递归删除）
+    ///
+    /// 选择"孩子提升为顶层"而不是"递归删除"：
+    /// - 删除一个父标签语义上是"折叠层级"，不该误删用户精心创建的子标签
+    /// - 用户如果真想全删，可在前端遍历子树主动删
     pub fn delete_tag(&self, id: i64) -> Result<bool, AppError> {
-        let conn = self
+        let mut conn = self
             .conn
             .lock()
             .map_err(|e| AppError::Custom(e.to_string()))?;
+        let tx = conn.transaction()?;
 
-        // 先删除关联关系
-        conn.execute("DELETE FROM note_tags WHERE tag_id = ?1", params![id])?;
+        // 1) 把子标签的 parent_id 置 NULL（提升为顶层）
+        tx.execute(
+            "UPDATE tags SET parent_id = NULL WHERE parent_id = ?1",
+            params![id],
+        )?;
+        // 2) 删笔记关联
+        tx.execute("DELETE FROM note_tags WHERE tag_id = ?1", params![id])?;
+        // 3) 删标签本身
+        let affected = tx.execute("DELETE FROM tags WHERE id = ?1", params![id])?;
 
-        // 再删除标签本身
-        let affected = conn.execute("DELETE FROM tags WHERE id = ?1", params![id])?;
-
+        tx.commit()?;
         Ok(affected > 0)
     }
 
@@ -291,7 +371,7 @@ impl Database {
             .map_err(|e| AppError::Custom(e.to_string()))?;
 
         let mut stmt = conn.prepare(
-            "SELECT t.id, t.name, t.color, COUNT(nt2.note_id) as note_count
+            "SELECT t.id, t.name, t.color, t.parent_id, COUNT(nt2.note_id) as note_count
              FROM tags t
              INNER JOIN note_tags nt ON t.id = nt.tag_id AND nt.note_id = ?1
              LEFT JOIN note_tags nt2 ON t.id = nt2.tag_id
@@ -306,7 +386,8 @@ impl Database {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     color: row.get(2)?,
-                    note_count: row.get(3)?,
+                    parent_id: row.get(3)?,
+                    note_count: row.get(4)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -465,6 +546,53 @@ mod sync_tag_tests {
             note_tag_names(&db, n2.id),
             vec!["n2only".to_string(), "共享".to_string()]
         );
+    }
+
+    #[test]
+    fn tag_tree_basic_parent_relation() {
+        let db = fresh();
+        let parent = db.create_tag("工作", None, None).unwrap();
+        let child = db
+            .create_tag("周报", None, Some(parent.id))
+            .unwrap();
+        assert_eq!(child.parent_id, Some(parent.id));
+        let listed = db.list_tags().unwrap();
+        let found = listed.iter().find(|t| t.id == child.id).unwrap();
+        assert_eq!(found.parent_id, Some(parent.id));
+    }
+
+    #[test]
+    fn tag_tree_reject_self_loop() {
+        let db = fresh();
+        let t = db.create_tag("A", None, None).unwrap();
+        let err = db.set_tag_parent(t.id, Some(t.id)).unwrap_err();
+        assert!(err.to_string().contains("自己"));
+    }
+
+    #[test]
+    fn tag_tree_reject_cycle() {
+        let db = fresh();
+        // A → B → C 链；尝试把 A 挂到 C 下应该拒绝（C 是 A 的后代）
+        let a = db.create_tag("A", None, None).unwrap();
+        let b = db.create_tag("B", None, Some(a.id)).unwrap();
+        let c = db.create_tag("C", None, Some(b.id)).unwrap();
+        let err = db.set_tag_parent(a.id, Some(c.id)).unwrap_err();
+        assert!(err.to_string().contains("循环"));
+    }
+
+    #[test]
+    fn tag_tree_delete_parent_promotes_children() {
+        let db = fresh();
+        let p = db.create_tag("Parent", None, None).unwrap();
+        let c1 = db.create_tag("C1", None, Some(p.id)).unwrap();
+        let c2 = db.create_tag("C2", None, Some(p.id)).unwrap();
+        db.delete_tag(p.id).unwrap();
+        // 父被删后，子标签应该还在，parent_id 变 NULL
+        let listed = db.list_tags().unwrap();
+        let f1 = listed.iter().find(|t| t.id == c1.id).unwrap();
+        let f2 = listed.iter().find(|t| t.id == c2.id).unwrap();
+        assert_eq!(f1.parent_id, None);
+        assert_eq!(f2.parent_id, None);
     }
 
     #[test]
