@@ -1,0 +1,161 @@
+import { useEffect, useState } from "react";
+import {
+  Modal,
+  Button,
+  Space,
+  Tooltip,
+  App as AntdApp,
+  theme as antdTheme,
+} from "antd";
+import { FolderOpen, Maximize2, Minimize2 } from "lucide-react";
+import { openPath } from "@tauri-apps/plugin-opener";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { useAttachmentPreviewStore } from "@/store/attachmentPreview";
+import { systemApi } from "@/lib/api";
+import { DocxPreview } from "./DocxPreview";
+import { XlsxPreview } from "./XlsxPreview";
+import { TextPreview } from "./TextPreview";
+
+/**
+ * 全局附件预览 Modal（单例，挂在 AppLayout 根部）。
+ *
+ * 设计：
+ * - 状态由 useAttachmentPreviewStore 全局控制，任何地方都能 open(...)
+ * - 按扩展名分发到 Docx/Xlsx/Text/PDF 各子预览组件
+ * - 标题栏始终带"用系统应用打开"按钮兜底（任何预览失败都能跳外部程序）
+ * - 最大化按钮：参考 editor.tsx PDF Modal 的体验，默认 85vw，点最大化变 100vw
+ */
+export function AttachmentPreviewModal() {
+  const target = useAttachmentPreviewStore((s) => s.target);
+  const close = useAttachmentPreviewStore((s) => s.close);
+  const { token } = antdTheme.useToken();
+  const { message } = AntdApp.useApp();
+  const [maximized, setMaximized] = useState(false);
+  /** PDF / 图片预览要用的 asset URL（http://asset.localhost/...） */
+  const [pdfSrc, setPdfSrc] = useState<string>("");
+  /** 系统程序打开兜底用的绝对路径（避免每次点按钮重新 resolve） */
+  const [absPath, setAbsPath] = useState<string>("");
+
+  const open = target != null;
+  const fileName = target?.fileName ?? "";
+  const ext = fileName.toLowerCase().split(".").pop() ?? "";
+
+  // 解析 rel → 绝对路径（系统程序打开 + PDF iframe src 都要用）
+  useEffect(() => {
+    if (!target) {
+      setPdfSrc("");
+      setAbsPath("");
+      return;
+    }
+    let cancelled = false;
+    systemApi
+      .resolveAssetAbsolute(target.rel)
+      .then((abs) => {
+        if (cancelled) return;
+        setAbsPath(abs);
+        // PDF iframe 用 asset 协议 URL（不是绝对路径，那是给 opener 用的）
+        if (ext === "pdf") setPdfSrc(convertFileSrc(abs));
+      })
+      .catch((e) => {
+        if (!cancelled) message.error(`路径解析失败：${e}`);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [target, ext, message]);
+
+  // 关闭时重置最大化状态（下次打开回到默认）
+  useEffect(() => {
+    if (!open) setMaximized(false);
+  }, [open]);
+
+  async function openExternal() {
+    if (!absPath) return;
+    try {
+      await openPath(absPath);
+      close();
+    } catch (e) {
+      message.error(`打开失败：${e}`);
+    }
+  }
+
+  const isOfficeWord = ext === "docx" || ext === "doc";
+  const isExcel =
+    ext === "xlsx" ||
+    ext === "xls" ||
+    ext === "xlsm" ||
+    ext === "xlsb" ||
+    ext === "ods";
+  const isPdf = ext === "pdf";
+
+  return (
+    <Modal
+      open={open}
+      destroyOnHidden
+      title={
+        <div
+          className="flex items-center justify-between"
+          style={{ paddingRight: 32, gap: 8 }}
+        >
+          <span className="truncate" style={{ minWidth: 0 }}>
+            {fileName || "附件预览"}
+          </span>
+          <Space size={4}>
+            <Tooltip title={maximized ? "还原窗口" : "最大化"}>
+              <Button
+                size="small"
+                type="text"
+                icon={
+                  maximized ? <Minimize2 size={14} /> : <Maximize2 size={14} />
+                }
+                onClick={() => setMaximized((v) => !v)}
+              />
+            </Tooltip>
+            <Button
+              size="small"
+              icon={<FolderOpen size={14} />}
+              onClick={() => void openExternal()}
+              disabled={!absPath}
+            >
+              用系统应用打开
+            </Button>
+          </Space>
+        </div>
+      }
+      footer={null}
+      onCancel={close}
+      width={maximized ? "100vw" : "85vw"}
+      style={{
+        top: maximized ? 0 : 24,
+        maxWidth: maximized ? "100vw" : undefined,
+        paddingBottom: 0,
+      }}
+      styles={{
+        body: {
+          height: maximized ? "calc(100vh - 56px)" : "75vh",
+          overflow: "auto",
+          background: token.colorBgContainer,
+        },
+      }}
+    >
+      {target == null ? null : isPdf ? (
+        // PDF 直接用 iframe + asset 协议；如果失败用户可点"用系统应用打开"
+        pdfSrc ? (
+          <iframe
+            src={pdfSrc}
+            style={{ width: "100%", height: "100%", border: "none" }}
+            title={fileName}
+          />
+        ) : (
+          <div style={{ padding: 24 }}>正在加载 PDF...</div>
+        )
+      ) : isOfficeWord ? (
+        <DocxPreview rel={target.rel} fileName={fileName} />
+      ) : isExcel ? (
+        <XlsxPreview rel={target.rel} />
+      ) : (
+        <TextPreview rel={target.rel} fileName={fileName} />
+      )}
+    </Modal>
+  );
+}

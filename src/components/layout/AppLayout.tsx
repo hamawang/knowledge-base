@@ -31,6 +31,7 @@ import { UpdateBadge } from "@/components/ui/UpdateBadge";
 import { UpdateModal } from "@/components/ui/UpdateModal";
 import { ExitConfirmListener } from "@/components/ui/ExitConfirmListener";
 import { CloseRequestedListener } from "@/components/ui/CloseRequestedListener";
+import { AttachmentPreviewModal } from "@/components/preview/AttachmentPreviewModal";
 import { useUpdateChecker } from "@/hooks/useUpdateChecker";
 import { SyncStatusButton } from "./SyncStatusButton";
 import { syncV1Api } from "@/lib/api";
@@ -742,6 +743,7 @@ export function AppLayout() {
         onClose={() => setQuickNoteOpen(false)}
       />
       <UpdateModal open={modalOpen} onClose={closeModal} update={update} />
+      <AttachmentPreviewModal />
       <ExitConfirmListener />
       <CloseRequestedListener />
       <AsrToggleController />

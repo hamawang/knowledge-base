@@ -188,6 +188,10 @@ import { SUPPORTED_PROVIDERS } from "./embedVideoProviders";
 import { attachmentApi, imageApi, systemApi, videoApi } from "@/lib/api";
 import { parseKbAsset, resolveAssetSrc, toKbAsset, KB_ASSET_SCHEME } from "@/lib/assetUrl";
 import { useAppStore } from "@/store";
+import {
+  useAttachmentPreviewStore,
+  isPreviewableAttachment,
+} from "@/store/attachmentPreview";
 import { EditorToolbar } from "./EditorToolbar";
 import { TableBubbleMenu } from "./TableBubbleMenu";
 import { AiWriteMenu } from "./AiWriteMenu";
@@ -645,6 +649,11 @@ interface TiptapEditorProps {
    */
   onAskAi?: (selectedText: string) => void;
   /**
+   * 阅读模式：true = 只读（隐藏 EditorToolbar / AiWriteMenu，setEditable(false)）。
+   * 默认 false（编辑模式）。仅外观和输入禁用，selection / 复制 / 滚动均正常。
+   */
+  readingMode?: boolean;
+  /**
    * 编辑器实例就绪时回调（含 destroy 时传 null）。
    * 用于父组件订阅 doc 变化，例如外挂大纲面板根据 heading 节点渲染。
    */
@@ -666,6 +675,7 @@ export function TiptapEditor({
   ensureNoteId,
   onWikiLinkClick,
   onAskAi,
+  readingMode = false,
   onEditorReady,
   showFooterStats = true,
 }: TiptapEditorProps) {
@@ -1165,6 +1175,8 @@ export function TiptapEditor({
   );
 
   const editor = useEditor({
+    // 初始可编辑状态由 readingMode 决定；后续切换通过下方 useEffect 调 editor.setEditable
+    editable: !readingMode,
     extensions: [
       StarterKit.configure({
         codeBlock: false, // 用 CodeBlockLowlight 替代
@@ -1489,6 +1501,12 @@ export function TiptapEditor({
   //
   // ProseMirror state 里 attrs.src 永远是 `kb-asset://...`，所以 getHTML/serialize
   // 输出的 markdown 与 DB 里的一致；只有 DOM 上的 src 被替换成可视 URL。
+  // 阅读模式同步：readingMode 变化时调 editor.setEditable，避免重建实例
+  useEffect(() => {
+    if (!editor) return;
+    editor.setEditable(!readingMode);
+  }, [editor, readingMode]);
+
   // 替换后 mutation 再次触发但识别不到 kb-asset:// → 自然终止，不会死循环。
   const dataDir = useAppStore((s) => s.instanceInfo?.dataDir ?? null);
   useEffect(() => {
@@ -1619,14 +1637,24 @@ export function TiptapEditor({
       ev.stopPropagation();
 
       if (href.startsWith(KB_ASSET_SCHEME)) {
-        // 新格式：kb-asset://<rel> → resolve 当前 data_dir 拿绝对路径再喂 opener
+        // 新格式：kb-asset://<rel>
+        // 可预览类型（Word/Excel/PDF/文本/代码）→ 调出全局预览 Modal；
+        // 其它（zip/mp3/exe 等）→ 用 OS 系统程序打开。
         const rel = parseKbAsset(href) ?? "";
-        void systemApi
-          .resolveAssetAbsolute(rel)
-          .then((abs) => openPath(abs))
-          .catch((e) => {
-            message.error(`打开附件失败: ${e}`);
-          });
+        if (isPreviewableAttachment(rel)) {
+          // 文件名优先用链接文本（用户可能改名），fallback 取 rel 最后一段
+          const linkText = linkEl.textContent?.trim() ?? "";
+          const fileName =
+            linkText || rel.split("/").pop() || rel.split("\\").pop() || rel;
+          useAttachmentPreviewStore.getState().open({ rel, fileName });
+        } else {
+          void systemApi
+            .resolveAssetAbsolute(rel)
+            .then((abs) => openPath(abs))
+            .catch((e) => {
+              message.error(`打开附件失败: ${e}`);
+            });
+        }
       } else if (href.startsWith("file://")) {
         // 旧格式：迁移 SQL 跑完后历史链接已被替换；这里保留兜底兼容未迁移的笔记
         const path = fileUrlToPath(href);
@@ -1760,11 +1788,16 @@ export function TiptapEditor({
 
   return (
     <div className="tiptap-wrapper" style={{ position: "relative" }}>
-      <EditorToolbar editor={editor} noteId={noteId} ensureNoteId={ensureNoteId} />
-      {/* 「问 AI 这段」与续写/总结/改写等：钉在 EditorToolbar 正下方的次级 sticky bar。
-          位置完全静态，跟豆包/划词翻译这类系统级浮窗物理错开（它们贴选区，咱贴顶部）。
-          选区状态控制可见性，无选区时 max-height:0 折叠，有选区时滑下来。 */}
-      <AiWriteMenu editor={editor} onAskAi={onAskAi} />
+      {/* 阅读模式下隐藏工具栏与 AI 划词条；selection / 复制 / 滚动均正常 */}
+      {!readingMode && (
+        <>
+          <EditorToolbar editor={editor} noteId={noteId} ensureNoteId={ensureNoteId} />
+          {/* 「问 AI 这段」与续写/总结/改写等：钉在 EditorToolbar 正下方的次级 sticky bar。
+              位置完全静态，跟豆包/划词翻译这类系统级浮窗物理错开（它们贴选区，咱贴顶部）。
+              选区状态控制可见性，无选区时 max-height:0 折叠，有选区时滑下来。 */}
+          <AiWriteMenu editor={editor} onAskAi={onAskAi} />
+        </>
+      )}
       <EditorContent editor={editor} className="tiptap-content" />
       {/* 查找替换浮条（Ctrl+F / Ctrl+H 触发；Esc 关闭） */}
       <SearchReplaceBar
