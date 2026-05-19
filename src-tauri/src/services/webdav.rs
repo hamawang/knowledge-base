@@ -344,6 +344,51 @@ impl WebDavClient {
         Ok(Some(bytes.to_vec()))
     }
 
+    /// P1-4: 用 HEAD 请求探测远端文件是否存在 —— **不传输 body**，省带宽。
+    ///
+    /// `has_attachment` 之前用 `download_bytes_optional`（GET）探测，会把整份附件
+    /// （可能 MB 级）下载下来只为看它在不在 → 每次 push 都重下全部远端附件。改 HEAD
+    /// 后只走一个响应头。
+    ///
+    /// 状态码处理：
+    /// - 2xx → `Ok(true)`（存在）
+    /// - 404 → `Ok(false)`（不存在）
+    /// - 401 / 403 → 认证错误 `Err`
+    /// - 405（个别 WebDAV 服务器禁用 HEAD）→ 自动降级用 GET 探测
+    /// - 其他 → `Err`
+    ///
+    /// 语义安全性：`has_attachment` 误判 false 只会重传（浪费带宽，不损坏数据），
+    /// 误判 true 会漏传（危险）。故除明确的 2xx 外都不返回 true —— 405 降级 GET、
+    /// 其余状态码一律 `Err`，绝不把不确定当成"已存在"。
+    pub async fn head_exists(&self, path: &str) -> Result<bool, AppError> {
+        let resp = self
+            .client
+            .head(self.file_url(path))
+            .headers(self.headers())
+            .send()
+            .await
+            .map_err(|e| AppError::Custom(format!("HEAD 探测失败: {}", e)))?;
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(true);
+        }
+        if status == StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            return Err(AppError::Custom("认证失败，请检查用户名/密码".into()));
+        }
+        if status == StatusCode::METHOD_NOT_ALLOWED {
+            // 个别服务器禁用 HEAD → 降级用 GET（download_bytes_optional）探测
+            log::debug!("[webdav] HEAD 不被支持（405），降级 GET 探测 {}", path);
+            return Ok(self.download_bytes_optional(path).await?.is_some());
+        }
+        Err(AppError::Custom(format!(
+            "HEAD 探测失败，服务器返回 {}",
+            status
+        )))
+    }
+
     /// 列出目录下的文件名（PROPFIND Depth:1，用正则抽取 <d:href>）
     /// 返回的是基础文件名（不含路径），按字母序
     pub async fn list_files(&self) -> Result<Vec<String>, AppError> {

@@ -215,11 +215,10 @@ impl SyncBackendImpl for WebdavBackend {
     }
 
     fn has_attachment(&self, hash: &str) -> Result<bool, AppError> {
-        // TODO 性能优化：用 HEAD 请求探测，不传输 body
-        // 当前用 download_bytes_optional 是正确但浪费带宽（附件可能 MB 级）
+        // P1-4：用 HEAD 探测（不传 body）。之前用 download_bytes_optional（GET）会把
+        // 整份附件下载下来只为判断存在性 → 每次 push 都重下全部远端附件，大库浪费带宽。
         let path = super::backend::cas_path(hash);
-        let exists = block_on(self.client.download_bytes_optional(&path))?.is_some();
-        Ok(exists)
+        block_on(self.client.head_exists(&path))
     }
 
     /// T-S025: 用 PROPFIND Depth:infinity 递归列 attachments/ 下所有附件文件名（即 hash）

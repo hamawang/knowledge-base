@@ -302,21 +302,31 @@ pub struct ConflictPair {
     pub remote: ManifestEntry,
 }
 
-/// T-S013：合并本地 manifest 与远端 manifest（push 末尾写远端前用）
+/// T-S013 / P0-2：合并本地 manifest 与远端 manifest（push 末尾写远端前用）
 ///
 /// 算法：以 `stable_id` 为键 outer-join：
-/// - 本地有 → 全部保留（本机视角是权威：刚刚 push 完，知道本地每条都是最新版本）
-/// - 远端独有 → 原样保留（防止吞掉别的设备已经 push 但本机还没 pull 到的项）
+/// - 两边都有 → 取 `updated_at` 较新者（相等取本地）
+/// - 本地独有 → 保留
+/// - 远端独有 → 保留（防止吞掉别的设备已 push 但本机还没 pull 到的项）
 ///
-/// **不取 updated_at 较新者**：push 之前已经做过 diff 决策（冲突已分流到 conflict 集合），
-/// 本地的每条 entry 都代表"本机认为对的版本"，直接用即可。
+/// **为什么两边都有时按 updated_at 判胜负**（P0-2 修复）：
+/// push 只上传 `diff.to_push`，对 `to_pull`（远端较新）/ `to_delete_local`（远端 tombstone）
+/// 的条目，本地 manifest entry 是**陈旧的**。早期实现"两边都有一律取 local" → push 会把
+/// 远端较新的笔记在 manifest 里回滚成旧版本、把别端删掉的笔记复活成 alive，导致 manifest
+/// 与远端 `.md` 文件不一致（其他端 pull 拿不到新内容 / 报 ".md 丢失"）。
+/// 改为 merge 阶段也做 updated_at 胜负判断，与 `diff_manifests` 同款逻辑 → 结果自洽。
 ///
-/// 合并结果：
-/// - `manifest_version` / `hash_algo` 用 local 的（新版客户端写出的格式）
-/// - `device` / `app_version` 用 local 的（标识最近写者）
-/// - `generated_at` 重置为当前时间
-/// - `entries` 排序后稳定输出（diff 友好）
+/// 注意：`updated_at` 是本地 `localtime` 字符串，跨时区 / 时钟偏差时比较仍不可靠（P0-3，
+/// 独立问题）；本修复只保证 merge 与 diff 用同一套判据，不引入新的不一致。
+///
+/// 合并结果元数据：`manifest_version` / `hash_algo` / `device` / `app_version` 用 local，
+/// `generated_at` 重置为当前时间，`entries` 按 `stable_id` 稳定排序。
 pub fn merge_manifests(local: &SyncManifestV1, remote: &SyncManifestV1) -> SyncManifestV1 {
+    let remote_map: HashMap<&str, &ManifestEntry> = remote
+        .entries
+        .iter()
+        .map(|e| (e.stable_id.as_str(), e))
+        .collect();
     let local_ids: std::collections::HashSet<&str> = local
         .entries
         .iter()
@@ -325,7 +335,15 @@ pub fn merge_manifests(local: &SyncManifestV1, remote: &SyncManifestV1) -> SyncM
 
     let mut merged: Vec<ManifestEntry> =
         Vec::with_capacity(local.entries.len() + remote.entries.len());
-    merged.extend(local.entries.iter().cloned());
+    // 本地每条 entry：与远端同 stable_id 比 updated_at，远端较新则取远端
+    // （修 push 回滚远端较新笔记 / 复活远端已删笔记）
+    for le in &local.entries {
+        match remote_map.get(le.stable_id.as_str()) {
+            Some(re) if re.updated_at > le.updated_at => merged.push((*re).clone()),
+            _ => merged.push(le.clone()),
+        }
+    }
+    // 远端独有 → 补（别的设备已 push 但本机还没 pull 到）
     for re in &remote.entries {
         if !local_ids.contains(re.stable_id.as_str()) {
             merged.push(re.clone());
@@ -431,8 +449,17 @@ pub fn diff_manifests(local: &SyncManifestV1, remote: &SyncManifestV1) -> Manife
             // T-S012: tombstone 处理优先
             match (le.tombstone, re.tombstone) {
                 (false, true) => {
-                    // 远端要求删本地
-                    diff.to_delete_local.push((*re).clone());
+                    // 远端把这条删成 tombstone。
+                    // P0-4：tombstone entry 的 updated_at 是删除时刻（deleted_at）。
+                    // 若本地 updated_at 比它还新 → 本地在"对端删除之后"又编辑过这条笔记
+                    // → "编辑胜过删除"：不删本地，改为 to_push 把本地编辑版重新推上去
+                    // （复活远端），避免本地这次编辑被静默丢进回收站。
+                    // 否则（本地未在删除后动过）→ 正常 to_delete_local 跟随删除。
+                    if le.updated_at > re.updated_at {
+                        diff.to_push.push((*le).clone());
+                    } else {
+                        diff.to_delete_local.push((*re).clone());
+                    }
                     continue;
                 }
                 (true, false) => {
@@ -448,21 +475,22 @@ pub fn diff_manifests(local: &SyncManifestV1, remote: &SyncManifestV1) -> Manife
             }
 
             if le.content_hash == re.content_hash {
-                // 内容一致，但元数据需要单向对齐（拉一次，update_note 内容不变，pull.rs 顺带补标记）：
-                // - 远端标记是日记、本地不是 → 恢复 is_daily（修历史"伪日记"）
-                // - 远端标记隐藏、本地不隐藏 → 恢复 is_hidden（避免隐藏笔记在新端变可见）
-                // - 双方都带 tags 但不同 → 拉一次同步标签（用户只改标签不改内容时 content_hash 不变，
-                //   不在这里触发的话标签变更永远传不到对端）
-                // 只做"远端有 → 本地补"的单向修复；反方向（本地有、远端没有）不动，靠 merge_manifests
-                // 用本地全量写远端 manifest 自然把标记带上去，下一轮其他端就能看到。
+                // 内容一致，但元数据可能需要对齐（拉一次，pull.rs 顺带补标记，正文不变）：
+                // - is_daily / is_hidden：单向恢复 —— 远端有标记、本地没有 → 拉一次补上
+                //   （修历史"伪日记" / 避免隐藏笔记在新端变可见）。反方向不动。
+                // - tags：方案 C —— 加 / 删标签已冒泡 updated_at（database::tags），按
+                //   updated_at 做 last-write-wins：仅当远端不旧于本地时才拉（远端标签较新 /
+                //   持平）。本地标签较新则不拉 —— 靠 push 的 merge_manifests 把本地标签写进
+                //   远端 manifest，再由对端拉走。这样"本地只改标签"不会在 pull 时被远端旧
+                //   标签回滚（修 P0-1）。
+                let meta_recover =
+                    (re.is_daily && !le.is_daily) || (re.is_hidden && !le.is_hidden);
                 let tags_differ = match (le.tags.as_ref(), re.tags.as_ref()) {
                     (Some(lt), Some(rt)) => lt != rt,
                     _ => false, // 任一为 None（旧 manifest / 加密 / tombstone）→ 不据此触发
                 };
-                if (re.is_daily && !le.is_daily)
-                    || (re.is_hidden && !le.is_hidden)
-                    || tags_differ
-                {
+                let pull_for_tags = tags_differ && re.updated_at >= le.updated_at;
+                if meta_recover || pull_for_tags {
                     diff.to_pull.push((*re).clone());
                 }
                 continue;
@@ -595,6 +623,19 @@ mod tests {
         assert_eq!(d.to_delete_local.len(), 1);
     }
 
+    /// P0-4：本地在远端删除之后又编辑过（本地 updated_at > tombstone 的 deleted_at）
+    /// → "编辑胜过删除"，进 to_push 复活，不进 to_delete_local（不丢本地新编辑）
+    #[test]
+    fn diff_edit_wins_when_local_edited_after_remote_delete() {
+        let local = manifest(vec![entry("1", "a", "h_edited", "2026-03-01", false)]);
+        // 远端 tombstone 的 updated_at = deleted_at，比本地编辑时刻早
+        let remote = manifest(vec![entry("1", "a", "", "2026-02-01", true)]);
+        let d = diff_manifests(&local, &remote);
+        assert_eq!(d.to_push.len(), 1, "本地编辑较新 → 复活推送");
+        assert!(!d.to_push[0].tombstone, "推上去的是本地 alive 版本");
+        assert_eq!(d.to_delete_local.len(), 0, "不能静默删掉本地新编辑");
+    }
+
     // ───────── T-S013：merge_manifests 测试 ─────────
 
     /// 远端独有项必须保留（不被吞）
@@ -650,14 +691,63 @@ mod tests {
         assert!(!m.generated_at.is_empty(), "应有当前时间戳");
     }
 
-    /// 双方都有 tombstone：本地版本优先（按合并规则 local 优先），不会被远端非 tombstone 覆盖
+    /// 本地 tombstone 的 deleted_at 比远端 alive 版本新 → merge 取本地 tombstone
     #[test]
     fn merge_local_tombstone_overrides_remote_alive() {
         let local = manifest(vec![entry("1", "a", "", "2026-03-01", true)]);
         let remote = manifest(vec![entry("1", "a", "h_alive", "2026-02-01", false)]);
         let m = merge_manifests(&local, &remote);
         assert_eq!(m.entries.len(), 1);
-        assert!(m.entries[0].tombstone, "本地 tombstone 必须优先");
+        assert!(m.entries[0].tombstone, "本地 tombstone 较新 → 取本地");
+    }
+
+    /// P0-2：两边都有同一笔记、远端 updated_at 较新 → merge 必须取远端版本。
+    /// 早期"两边都有一律取 local"会把远端较新的笔记在 manifest 里回滚成本地旧版本。
+    #[test]
+    fn merge_takes_remote_when_remote_newer() {
+        let local = manifest(vec![entry("1", "旧标题", "h_old", "2026-01-01", false)]);
+        let remote = manifest(vec![entry("1", "新标题", "h_new", "2026-02-01", false)]);
+        let m = merge_manifests(&local, &remote);
+        assert_eq!(m.entries.len(), 1);
+        assert_eq!(
+            m.entries[0].content_hash, "h_new",
+            "远端较新 → 取远端，不能回滚成本地旧 hash"
+        );
+        assert_eq!(m.entries[0].title, "新标题");
+    }
+
+    /// P0-2：远端把笔记删成 tombstone（deleted_at 较新）而本地还 alive
+    /// → merge 必须保留远端 tombstone，否则 push 会把已删笔记复活。
+    #[test]
+    fn merge_keeps_remote_tombstone_when_newer() {
+        let local = manifest(vec![entry("1", "a", "h_alive", "2026-01-01", false)]);
+        let remote = manifest(vec![entry("1", "a", "", "2026-02-01", true)]);
+        let m = merge_manifests(&local, &remote);
+        assert_eq!(m.entries.len(), 1);
+        assert!(
+            m.entries[0].tombstone,
+            "远端 tombstone 较新 → 不能复活已删笔记"
+        );
+    }
+
+    /// P0-2：本地较新（push 刚上传的笔记）→ merge 取本地，不被远端旧版本覆盖。
+    #[test]
+    fn merge_takes_local_when_local_newer() {
+        let local = manifest(vec![entry("1", "本地新", "h_local", "2026-03-01", false)]);
+        let remote = manifest(vec![entry("1", "远端旧", "h_remote", "2026-02-01", false)]);
+        let m = merge_manifests(&local, &remote);
+        assert_eq!(m.entries.len(), 1);
+        assert_eq!(m.entries[0].content_hash, "h_local", "本地较新 → 取本地");
+    }
+
+    /// P0-2：updated_at 完全相等 → merge 取本地（push 端视角；真冲突由 pull 端处理）。
+    #[test]
+    fn merge_takes_local_when_ts_equal() {
+        let local = manifest(vec![entry("1", "L", "h_local", "2026-01-01", false)]);
+        let remote = manifest(vec![entry("1", "R", "h_remote", "2026-01-01", false)]);
+        let m = merge_manifests(&local, &remote);
+        assert_eq!(m.entries.len(), 1);
+        assert_eq!(m.entries[0].content_hash, "h_local");
     }
 
     /// T-S012：本地 tombstone + 远端非 tombstone → 推送删除
@@ -1385,7 +1475,7 @@ mod tests {
         let _ = no_tag;
     }
 
-    /// diff：内容相同但 tags 不同 → 拉一次（让"只改标签"能跨端）
+    /// diff：内容相同、tags 不同、updated_at 持平 → 拉一次（让"只改标签"能跨端）
     #[test]
     fn diff_recovers_tags_when_only_tags_differ() {
         let local = manifest(vec![entry_with_tags("1", "a", "h1", "t", vec!["工作"])]);
@@ -1393,6 +1483,38 @@ mod tests {
         let d = diff_manifests(&local, &remote);
         assert_eq!(d.to_pull.len(), 1, "tags 不同应触发拉取（content_hash 没变）");
         assert_eq!(d.to_push.len(), 0);
+    }
+
+    /// P0-1 / 方案 C：内容相同、本地标签较新（updated_at 更大）→ 不 to_pull
+    /// （否则 pull 会把本地刚改的标签回滚成远端旧标签）
+    #[test]
+    fn diff_no_pull_when_local_tags_newer() {
+        let local = manifest(vec![entry_with_tags(
+            "1",
+            "a",
+            "h1",
+            "2026-02-01",
+            vec!["工作", "周报"],
+        )]);
+        let remote = manifest(vec![entry_with_tags("1", "a", "h1", "2026-01-01", vec!["工作"])]);
+        let d = diff_manifests(&local, &remote);
+        assert_eq!(d.to_pull.len(), 0, "本地标签较新 → 不拉，避免回滚（P0-1）");
+        assert_eq!(d.to_push.len(), 0);
+    }
+
+    /// 方案 C：内容相同、远端标签较新（updated_at 更大）→ to_pull（接收远端标签）
+    #[test]
+    fn diff_pull_when_remote_tags_newer() {
+        let local = manifest(vec![entry_with_tags("1", "a", "h1", "2026-01-01", vec!["工作"])]);
+        let remote = manifest(vec![entry_with_tags(
+            "1",
+            "a",
+            "h1",
+            "2026-02-01",
+            vec!["工作", "周报"],
+        )]);
+        let d = diff_manifests(&local, &remote);
+        assert_eq!(d.to_pull.len(), 1, "远端标签较新 → 拉取");
     }
 
     /// diff：双方 tags 都为 None（旧客户端 / 加密 / tombstone）→ 不据此触发

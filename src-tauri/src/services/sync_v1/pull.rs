@@ -267,6 +267,13 @@ pub fn pull<R: Runtime, E: Emitter<R>>(
         .iter()
         .map(|e| (e.stable_id.as_str(), e.content_hash.as_str()))
         .collect();
+    // 方案 C：本地每条笔记当前的 updated_at（按 stable_uuid 索引）——
+    // pull 据此判断要不要用远端标签覆盖本地（本地标签较新时不覆盖，见 should_overwrite_tags）
+    let local_updated_at_by_uuid: std::collections::HashMap<&str, &str> = local
+        .entries
+        .iter()
+        .map(|e| (e.stable_id.as_str(), e.updated_at.as_str()))
+        .collect();
     let remote_states = db.list_remote_state(backend_id)?;
 
     // ── 处理 to_pull（远端独有 / 远端较新）
@@ -305,6 +312,35 @@ pub fn pull<R: Runtime, E: Emitter<R>>(
                     entry.title
                 );
                 continue;
+            }
+            // P0-5：加密笔记也做分歧检测 —— 本地有未推送改动且与远端各不相同 →
+            // 不静默用远端密文覆盖本地，落冲突文件保留本地。加密笔记冲突在 UI 上
+            // 只能"忽略"（密文不可合并），但至少本地这次编辑不会被悄悄冲掉。
+            if let Some(local_id) = db.get_note_id_by_stable_uuid(&entry.stable_id)? {
+                let diverged = is_divergence(
+                    local_hash_by_uuid.get(entry.stable_id.as_str()).copied(),
+                    remote_states.get(&local_id).map(|s| s.last_synced_hash.as_str()),
+                    &entry.content_hash,
+                );
+                if diverged {
+                    match super::conflicts::write_conflict_file(
+                        conflicts_dir,
+                        &entry.stable_id,
+                        &body,
+                    ) {
+                        Ok(_) => {
+                            result.conflicts += 1;
+                            log::warn!(
+                                "[sync_v1] 加密笔记 {} 本地/远端各改各的，已落冲突文件，本地保留（密文不可合并，请在设置页处理）",
+                                entry.title
+                            );
+                        }
+                        Err(e) => result
+                            .errors
+                            .push(format!("写加密冲突文件失败 ({}): {}", entry.title, e)),
+                    }
+                    continue;
+                }
             }
             use base64::Engine as _;
             let blob = match base64::engine::general_purpose::STANDARD.decode(body.as_bytes()) {
@@ -403,11 +439,18 @@ pub fn pull<R: Runtime, E: Emitter<R>>(
                         // Bug 12a：按 name 替换本地 tag 关联。Option 区分新旧客户端：
                         //   None → 旧 manifest 没此字段 / 加密笔记 / tombstone → 不动
                         //   Some(_) → 替换（含 Some(vec![]) → 清空，让"用户在另一端删空标签"也能跨端传播）
+                        // 方案 C：仅当远端 entry 不旧于本地时才覆盖标签（should_overwrite_tags）——
+                        // 本地标签较新时保留本地，不被远端旧标签回滚（P0-1）。
                         if let Some(tag_names) = entry.tags.as_ref() {
-                            if let Err(e) = db.sync_note_tags(local_id, tag_names) {
-                                result
-                                    .errors
-                                    .push(format!("对齐标签失败 {}: {}", entry.title, e));
+                            let local_ua = local_updated_at_by_uuid
+                                .get(entry.stable_id.as_str())
+                                .copied();
+                            if should_overwrite_tags(&entry.updated_at, local_ua) {
+                                if let Err(e) = db.sync_note_tags(local_id, tag_names) {
+                                    result
+                                        .errors
+                                        .push(format!("对齐标签失败 {}: {}", entry.title, e));
+                                }
                             }
                         }
                         Some(local_id)
@@ -547,6 +590,19 @@ fn is_divergence(local_hash: Option<&str>, last_synced_hash: Option<&str>, remot
     }
 }
 
+/// 方案 C：pull 时是否该用远端标签覆盖本地标签。
+///
+/// 标签变更已冒泡 `updated_at`（见 `database::tags` 的 `bump_note_updated_at`），故按
+/// last-write-wins：远端 entry 的 `updated_at` 不旧于本地 → 覆盖；本地较新 → 保留本地
+/// （这条 entry 多半是因 is_daily / is_hidden 恢复被一起拉下来的，标签不该跟着回滚）。
+/// 本地 `updated_at` 缺失（理论上不会发生）→ 兜底覆盖。
+fn should_overwrite_tags(remote_updated_at: &str, local_updated_at: Option<&str>) -> bool {
+    match local_updated_at {
+        Some(lua) => remote_updated_at >= lua,
+        None => true,
+    }
+}
+
 /// 把 "工作/周报" 风格的路径递归展平成 folder_id
 ///
 /// 复用 `FolderService::ensure_path`（T-006 阶段已实现）
@@ -572,5 +628,17 @@ mod tests {
         // 该笔记从未同步过 / 信息缺失 → 不算分歧
         assert!(!is_divergence(Some("localH"), None, "remoteH"));
         assert!(!is_divergence(None, Some("syncedH"), "remoteH"));
+    }
+
+    #[test]
+    fn overwrite_tags_only_when_remote_not_older() {
+        // 远端 entry 较新 → 用远端标签覆盖本地
+        assert!(should_overwrite_tags("2026-02-01 00:00:00", Some("2026-01-01 00:00:00")));
+        // updated_at 持平 → 覆盖（标签冲突极小概率，远端赢，结果确定）
+        assert!(should_overwrite_tags("2026-01-01 00:00:00", Some("2026-01-01 00:00:00")));
+        // 本地较新 → 保留本地标签，不回滚（P0-1 核心）
+        assert!(!should_overwrite_tags("2026-01-01 00:00:00", Some("2026-02-01 00:00:00")));
+        // 本地 updated_at 缺失 → 兜底覆盖
+        assert!(should_overwrite_tags("2026-01-01 00:00:00", None));
     }
 }

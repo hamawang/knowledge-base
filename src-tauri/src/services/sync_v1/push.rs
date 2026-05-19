@@ -291,6 +291,9 @@ pub fn push<R: Runtime, E: Emitter<R>>(
 
     // T-S031 + 进度/限流加固：**分小批**上传 —— 每批传完就报一次进度（进度条一格一格走，
     // 不再"全传完才一口气报"卡在 0%），并按上一批的表现**自适应调并发**（撞 5xx → 下批减半；干净 → 下批 +2；范围 [1,8]）。
+    // P1-1：标记批量上传是否因远端不可用 / 限流而硬中止；中止时下面会跳过 manifest 写入，
+    // 避免 merge(local) 把未成功上传的 entry 也写进远端 manifest（宣告不存在的 .md）。
+    let mut upload_aborted = false;
     if !pending.is_empty() {
         let total = pending.len();
         let _ = emitter.emit(
@@ -329,6 +332,7 @@ pub fn push<R: Runtime, E: Emitter<R>>(
                 result
                     .errors
                     .push(format!("批量上传已中止（剩余 {} 条未上传）：{}", total - done, abort_msg));
+                upload_aborted = true; // P1-1：标记中止 → 下面跳过 manifest 写入
                 break 'chunks;
             }
 
@@ -463,7 +467,11 @@ pub fn push<R: Runtime, E: Emitter<R>>(
             phase: "manifest".into(),
             current: 0,
             total: 0,
-            message: "合并并更新远端 manifest…".into(),
+            message: if upload_aborted {
+                "批量上传中止 → 跳过 manifest 更新".into()
+            } else {
+                "合并并更新远端 manifest…".into()
+            },
         },
     );
 
@@ -480,7 +488,19 @@ pub fn push<R: Runtime, E: Emitter<R>>(
 
     const MANIFEST_WRITE_MAX_ATTEMPTS: u32 = 3;
     let mut last_err: Option<String> = None;
+    if upload_aborted {
+        // P1-1：批量上传中止（远端不可用 / 限流硬失败）→ 不写 manifest。
+        // 否则 merge(local) 会把全部 entry（含没上传成功的）写进远端 manifest，
+        // 宣告一批并不存在的 .md，其他端 pull 会拿不到内容 / 报 ".md 丢失"。
+        last_err = Some(
+            "批量上传中止，已跳过远端 manifest 更新（避免宣告未上传的笔记）；远端恢复后重试即可".into(),
+        );
+    }
     for attempt in 1..=MANIFEST_WRITE_MAX_ATTEMPTS {
+        // P1-1：中止时不进入 manifest 写入循环
+        if upload_aborted {
+            break;
+        }
         // 1) 重新读远端（含别人这一窗口期里写入的更新）
         let remote_now = match backend.read_manifest() {
             Ok(Some(m)) => m,
@@ -534,11 +554,17 @@ pub fn push<R: Runtime, E: Emitter<R>>(
             std::thread::sleep(std::time::Duration::from_millis(300 * attempt as u64));
         }
     }
+    // P1-2：manifest 是 push 的"提交点"。没写成（upload_aborted / 写入失败）→ 不刷新
+    // last_push_ts，让自动调度器下个 tick（~60s）就重试，而不是干等满一个同步间隔。
+    // 个别笔记 / 附件失败但 manifest 写成了 → 仍 touch（属部分成功，下轮增量自然补齐）。
+    let manifest_ok = last_err.is_none();
     if let Some(e) = last_err {
         result.errors.push(e);
     }
 
-    db.touch_sync_backend_push(backend_id)?;
+    if manifest_ok {
+        db.touch_sync_backend_push(backend_id)?;
+    }
 
     let _ = emitter.emit(
         event_name,

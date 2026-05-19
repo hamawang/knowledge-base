@@ -5,6 +5,27 @@ use crate::models::{Note, Tag};
 
 use super::Database;
 
+/// 方案 C：把某笔记的 `updated_at` 冒泡到当前时刻（标签关联变更后调用）。
+///
+/// 为什么标签变更要动 `updated_at`：同步 V1 的 manifest diff 靠 `updated_at` 判定
+/// 笔记是哪一端改的。加 / 删标签只动 `note_tags` 关联表，不改 `content` 也不改
+/// `updated_at` → 同步时无法区分"本端刚改了标签"和"对端改了标签"，pull 会无条件
+/// 用远端标签覆盖本地 → 本端的标签改动被静默回滚（P0-1）。冒泡 `updated_at` 后，
+/// diff / pull 可按 last-write-wins 正确判向。
+///
+/// 仅 `UPDATE` `updated_at` 一列：FTS / word_count 触发器监听 `UPDATE OF title, content`，
+/// 不会被本更新触发（不引发索引级联）。
+///
+/// 注意：`sync_note_tags`（pull 端对齐远端标签的"同步接收"方向）**不**调用本函数 ——
+/// 否则 pull 完笔记就被判成"本地较新" → 又推回远端 → 推拉震荡。
+fn bump_note_updated_at(conn: &rusqlite::Connection, note_id: i64) -> Result<(), AppError> {
+    conn.execute(
+        "UPDATE notes SET updated_at = datetime('now', 'localtime') WHERE id = ?1",
+        params![note_id],
+    )?;
+    Ok(())
+}
+
 impl Database {
     // ─── 标签 DAO ─────────────────────────────────
 
@@ -364,17 +385,23 @@ impl Database {
     }
 
     /// 给笔记添加标签
+    ///
+    /// 方案 C：真插入了新关联时冒泡 `notes.updated_at`（见 [`bump_note_updated_at`]），
+    /// 让同步能判定"标签是本端改的"；命中已存在关联（INSERT OR IGNORE 未插入）则不动。
     pub fn add_tag_to_note(&self, note_id: i64, tag_id: i64) -> Result<(), AppError> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| AppError::Custom(e.to_string()))?;
 
-        conn.execute(
+        let affected = conn.execute(
             "INSERT OR IGNORE INTO note_tags (note_id, tag_id) VALUES (?1, ?2)",
             params![note_id, tag_id],
         )?;
 
+        if affected > 0 {
+            bump_note_updated_at(&conn, note_id)?;
+        }
         Ok(())
     }
 
@@ -396,20 +423,31 @@ impl Database {
             .map_err(|e| AppError::Custom(e.to_string()))?;
         let tx = conn.transaction()?;
         let mut inserted = 0usize;
+        // 方案 C：记录真新增了关联的笔记，事务提交前冒泡其 updated_at（同 add_tag_to_note）
+        let mut touched: std::collections::HashSet<i64> = std::collections::HashSet::new();
         {
             let mut stmt =
                 tx.prepare("INSERT OR IGNORE INTO note_tags (note_id, tag_id) VALUES (?1, ?2)")?;
             for nid in note_ids {
                 for tid in tag_ids {
-                    inserted += stmt.execute(params![nid, tid])?;
+                    let n = stmt.execute(params![nid, tid])?;
+                    inserted += n;
+                    if n > 0 {
+                        touched.insert(*nid);
+                    }
                 }
             }
+        }
+        for nid in &touched {
+            bump_note_updated_at(&tx, *nid)?;
         }
         tx.commit()?;
         Ok(inserted)
     }
 
     /// 移除笔记的标签
+    ///
+    /// 方案 C：真删除了关联时冒泡 `notes.updated_at`（见 [`bump_note_updated_at`]）。
     pub fn remove_tag_from_note(&self, note_id: i64, tag_id: i64) -> Result<bool, AppError> {
         let conn = self
             .conn
@@ -421,6 +459,9 @@ impl Database {
             params![note_id, tag_id],
         )?;
 
+        if affected > 0 {
+            bump_note_updated_at(&conn, note_id)?;
+        }
         Ok(affected > 0)
     }
 
@@ -532,6 +573,109 @@ mod sync_tag_tests {
             db.get_note_tags(note_id).unwrap().into_iter().map(|t| t.name).collect();
         names.sort();
         names
+    }
+
+    /// 读某笔记当前的 updated_at（方案 C 的 bump 测试用）
+    fn note_updated_at(db: &Database, note_id: i64) -> String {
+        let conn = db.conn_lock().unwrap();
+        conn.query_row("SELECT updated_at FROM notes WHERE id = ?1", [note_id], |r| {
+            r.get(0)
+        })
+        .unwrap()
+    }
+
+    /// 把某笔记的 updated_at 强制设成指定值（bump 测试的基准）
+    fn set_updated_at(db: &Database, note_id: i64, ts: &str) {
+        let conn = db.conn_lock().unwrap();
+        conn.execute(
+            "UPDATE notes SET updated_at = ?1 WHERE id = ?2",
+            rusqlite::params![ts, note_id],
+        )
+        .unwrap();
+    }
+
+    /// 方案 C：add_tag_to_note 真新增关联时冒泡 updated_at；命中已存在关联则不动
+    #[test]
+    fn add_tag_to_note_bumps_updated_at_only_on_real_insert() {
+        let db = fresh();
+        let n = db
+            .create_note(&NoteInput {
+                title: "x".into(),
+                content: "y".into(),
+                folder_id: None,
+            })
+            .unwrap();
+        let tag = db.get_or_create_tag_by_name("工作").unwrap();
+
+        set_updated_at(&db, n.id, "2000-01-01 00:00:00");
+        db.add_tag_to_note(n.id, tag).unwrap();
+        assert_ne!(
+            note_updated_at(&db, n.id),
+            "2000-01-01 00:00:00",
+            "加标签（真新增关联）应冒泡 updated_at"
+        );
+
+        // 再加同一个标签：INSERT OR IGNORE 命中已存在 → affected=0 → 不应 bump
+        set_updated_at(&db, n.id, "2000-01-01 00:00:00");
+        db.add_tag_to_note(n.id, tag).unwrap();
+        assert_eq!(
+            note_updated_at(&db, n.id),
+            "2000-01-01 00:00:00",
+            "重复加同一标签未真插入 → 不应 bump"
+        );
+    }
+
+    /// 方案 C：remove_tag_from_note 真删除关联时冒泡 updated_at；删不存在的关联则不动
+    #[test]
+    fn remove_tag_from_note_bumps_updated_at_only_on_real_delete() {
+        let db = fresh();
+        let n = db
+            .create_note(&NoteInput {
+                title: "x".into(),
+                content: "y".into(),
+                folder_id: None,
+            })
+            .unwrap();
+        let tag = db.get_or_create_tag_by_name("工作").unwrap();
+        db.add_tag_to_note(n.id, tag).unwrap();
+
+        set_updated_at(&db, n.id, "2000-01-01 00:00:00");
+        db.remove_tag_from_note(n.id, tag).unwrap();
+        assert_ne!(
+            note_updated_at(&db, n.id),
+            "2000-01-01 00:00:00",
+            "删标签（真删除关联）应冒泡 updated_at"
+        );
+
+        // 再删（关联已不存在）→ affected=0 → 不应 bump
+        set_updated_at(&db, n.id, "2000-01-01 00:00:00");
+        db.remove_tag_from_note(n.id, tag).unwrap();
+        assert_eq!(
+            note_updated_at(&db, n.id),
+            "2000-01-01 00:00:00",
+            "删不存在的关联 → 不应 bump"
+        );
+    }
+
+    /// 方案 C：sync_note_tags（同步「接收」方向）故意不冒泡 updated_at ——
+    /// 否则 pull 完笔记就被判成"本地较新" → 推回远端 → 推拉震荡
+    #[test]
+    fn sync_note_tags_does_not_bump_updated_at() {
+        let db = fresh();
+        let n = db
+            .create_note(&NoteInput {
+                title: "x".into(),
+                content: "y".into(),
+                folder_id: None,
+            })
+            .unwrap();
+        set_updated_at(&db, n.id, "2000-01-01 00:00:00");
+        db.sync_note_tags(n.id, &["工作".into(), "周报".into()]).unwrap();
+        assert_eq!(
+            note_updated_at(&db, n.id),
+            "2000-01-01 00:00:00",
+            "sync_note_tags 不应冒泡 updated_at（同步接收方向）"
+        );
     }
 
     #[test]
