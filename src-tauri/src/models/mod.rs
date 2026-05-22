@@ -771,6 +771,12 @@ pub struct Task {
     /// 配合 `due_date`（右端）形成时间区间；只有右端没左端时甘特图渲染为"截止点"
     #[serde(default)]
     pub start_date: Option<String>,
+    /// v43 跨端同步稳定标识；旧库尚未迁移时可能为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stable_uuid: Option<String>,
+    /// v43 软删墓碑标记；UI 列表始终过滤掉，仅同步层读取。
+    #[serde(default)]
+    pub is_deleted: bool,
     /// 已完成子任务数（仅主任务有意义；子任务恒为 0）
     #[serde(default)]
     pub subtask_done: i32,
@@ -835,6 +841,12 @@ pub struct Project {
     /// 该项目下"已完成"任务数（status=1）
     #[serde(default)]
     pub done_task_count: i64,
+    /// v42 跨端同步稳定标识；旧库尚未迁移时可能为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stable_uuid: Option<String>,
+    /// v42 软删墓碑标记；UI 列表始终过滤掉，仅同步层读取。
+    #[serde(default)]
+    pub is_deleted: bool,
 }
 
 /// 创建项目入参
@@ -979,6 +991,11 @@ pub struct TaskCategory {
     pub icon: Option<String>,
     pub sort_order: i32,
     pub created_at: String,
+    /// v44 跨端同步稳定标识。
+    /// 同步层用此让"用户在 A 端把分类重命名"也能跨端识别为同一个分类，
+    /// 不必每次都按 name 做匹配。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stable_uuid: Option<String>,
 }
 
 /// 创建分类入参

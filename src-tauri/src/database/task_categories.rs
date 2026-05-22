@@ -21,7 +21,7 @@ impl super::Database {
             .lock()
             .map_err(|e| AppError::Custom(e.to_string()))?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, color, icon, sort_order, created_at
+            "SELECT id, name, color, icon, sort_order, created_at, stable_uuid
              FROM task_categories
              ORDER BY sort_order ASC, id ASC",
         )?;
@@ -34,6 +34,7 @@ impl super::Database {
                     icon: row.get(3)?,
                     sort_order: row.get(4)?,
                     created_at: row.get(5)?,
+                    stable_uuid: row.get(6)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -52,10 +53,17 @@ impl super::Database {
             .filter(|c| !c.trim().is_empty())
             .unwrap_or("#1677ff")
             .to_string();
+        let uuid = uuid::Uuid::new_v4().to_string();
         conn.execute(
-            "INSERT INTO task_categories (name, color, icon, sort_order)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![input.name, color, input.icon, input.sort_order.unwrap_or(0),],
+            "INSERT INTO task_categories (name, color, icon, sort_order, stable_uuid)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                input.name,
+                color,
+                input.icon,
+                input.sort_order.unwrap_or(0),
+                uuid,
+            ],
         )
         .map_err(|e| translate_name_conflict(e, &input.name))?;
         Ok(conn.last_insert_rowid())
@@ -119,5 +127,25 @@ impl super::Database {
             .map_err(|e| AppError::Custom(e.to_string()))?;
         let affected = conn.execute("DELETE FROM task_categories WHERE id = ?1", params![id])?;
         Ok(affected > 0)
+    }
+
+    /// 按 stable_uuid 找本地分类 id（sync pull 端用）。
+    #[allow(dead_code)]
+    pub fn get_task_category_id_by_stable_uuid(
+        &self,
+        stable_uuid: &str,
+    ) -> Result<Option<i64>, AppError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| AppError::Custom(e.to_string()))?;
+        let id: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM task_categories WHERE stable_uuid = ?1",
+                params![stable_uuid],
+                |row| row.get(0),
+            )
+            .ok();
+        Ok(id)
     }
 }

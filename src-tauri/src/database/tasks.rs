@@ -19,8 +19,11 @@ impl super::Database {
             .lock()
             .map_err(|e| AppError::Custom(e.to_string()))?;
 
-        // 主任务过滤永远生效（子任务列表走 list_subtasks）
-        let mut where_clauses: Vec<String> = vec!["t.parent_task_id IS NULL".into()];
+        // 主任务过滤永远生效（子任务列表走 list_subtasks）；v43：始终过滤软删墓碑
+        let mut where_clauses: Vec<String> = vec![
+            "t.parent_task_id IS NULL".into(),
+            "t.is_deleted = 0".into(),
+        ];
         let mut binds: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if let Some(s) = query.status {
             where_clauses.push("t.status = ?".into());
@@ -54,6 +57,7 @@ impl super::Database {
                     t.repeat_kind, t.repeat_interval, t.repeat_weekdays, t.repeat_until,
                     t.repeat_count, t.repeat_done_count, t.source_batch_id, t.category_id,
                     t.parent_task_id, t.kanban_stage, t.project_id, t.start_date,
+                    t.stable_uuid, t.is_deleted,
                     COALESCE(s.done, 0)  AS subtask_done,
                     COALESCE(s.total, 0) AS subtask_total
              FROM tasks t
@@ -62,7 +66,7 @@ impl super::Database {
                         SUM(CASE WHEN status = 1 THEN 1 ELSE 0 END) AS done,
                         COUNT(*) AS total
                  FROM tasks
-                 WHERE parent_task_id IS NOT NULL
+                 WHERE parent_task_id IS NOT NULL AND is_deleted = 0
                  GROUP BY parent_task_id
              ) s ON s.parent_task_id = t.id
              {}
@@ -102,8 +106,10 @@ impl super::Database {
                     kanban_stage: row.get(21)?,
                     project_id: row.get(22)?,
                     start_date: row.get(23)?,
-                    subtask_done: row.get(24)?,
-                    subtask_total: row.get(25)?,
+                    stable_uuid: row.get(24)?,
+                    is_deleted: row.get::<_, i32>(25)? != 0,
+                    subtask_done: row.get(26)?,
+                    subtask_total: row.get(27)?,
                     links: Vec::new(),
                 })
             })?
@@ -159,10 +165,11 @@ impl super::Database {
                         t.repeat_kind, t.repeat_interval, t.repeat_weekdays, t.repeat_until,
                         t.repeat_count, t.repeat_done_count, t.source_batch_id, t.category_id,
                         t.parent_task_id, t.kanban_stage, t.project_id, t.start_date,
+                        t.stable_uuid, t.is_deleted,
                         COALESCE((SELECT SUM(CASE WHEN status = 1 THEN 1 ELSE 0 END)
-                                  FROM tasks WHERE parent_task_id = t.id), 0) AS subtask_done,
-                        COALESCE((SELECT COUNT(*) FROM tasks WHERE parent_task_id = t.id), 0) AS subtask_total
-                 FROM tasks t WHERE t.id = ?1",
+                                  FROM tasks WHERE parent_task_id = t.id AND is_deleted = 0), 0) AS subtask_done,
+                        COALESCE((SELECT COUNT(*) FROM tasks WHERE parent_task_id = t.id AND is_deleted = 0), 0) AS subtask_total
+                 FROM tasks t WHERE t.id = ?1 AND t.is_deleted = 0",
                 params![id],
                 |row| {
                     Ok(Task {
@@ -190,8 +197,10 @@ impl super::Database {
                         kanban_stage: row.get(21)?,
                         project_id: row.get(22)?,
                         start_date: row.get(23)?,
-                        subtask_done: row.get(24)?,
-                        subtask_total: row.get(25)?,
+                        stable_uuid: row.get(24)?,
+                        is_deleted: row.get::<_, i32>(25)? != 0,
+                        subtask_done: row.get(26)?,
+                        subtask_total: row.get(27)?,
                         links: Vec::new(),
                     })
                 },
@@ -237,8 +246,9 @@ impl super::Database {
                     completed_at, created_at, updated_at, remind_before_minutes, reminded_at,
                     repeat_kind, repeat_interval, repeat_weekdays, repeat_until,
                     repeat_count, repeat_done_count, source_batch_id, category_id,
-                    parent_task_id, kanban_stage, project_id, start_date
-             FROM tasks WHERE parent_task_id = ?1
+                    parent_task_id, kanban_stage, project_id, start_date,
+                    stable_uuid, is_deleted
+             FROM tasks WHERE parent_task_id = ?1 AND is_deleted = 0
              ORDER BY status ASC, created_at ASC, id ASC",
         )?;
         let rows = stmt
@@ -268,6 +278,8 @@ impl super::Database {
                     kanban_stage: row.get(21)?,
                     project_id: row.get(22)?,
                     start_date: row.get(23)?,
+                    stable_uuid: row.get(24)?,
+                    is_deleted: row.get::<_, i32>(25)? != 0,
                     subtask_done: 0,
                     subtask_total: 0,
                     links: Vec::new(),
@@ -336,13 +348,14 @@ impl super::Database {
             .unwrap_or("none")
             .to_string();
         let interval = input.repeat_interval.unwrap_or(1).max(1);
+        let uuid = uuid::Uuid::new_v4().to_string();
         tx.execute(
             "INSERT INTO tasks (title, description, priority, important, due_date,
                                 remind_before_minutes, repeat_kind, repeat_interval,
                                 repeat_weekdays, repeat_until, repeat_count,
                                 source_batch_id, category_id, parent_task_id,
-                                project_id, start_date)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                                project_id, start_date, stable_uuid)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 input.title,
                 input.description,
@@ -364,6 +377,7 @@ impl super::Database {
                 input.parent_task_id,
                 input.project_id,
                 input.start_date,
+                uuid,
             ],
         )?;
         let task_id = tx.last_insert_rowid();
@@ -609,16 +623,23 @@ impl super::Database {
         Ok(())
     }
 
+    /// 删除任务（v43 改为软删 tombstone，让跨端 manifest 也能感知）。
+    /// task_links 保留不动 —— 复活时还能继续用；GC 由后续逻辑负责。
     pub fn delete_task(&self, id: i64) -> Result<bool, AppError> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| AppError::Custom(e.to_string()))?;
-        let affected = conn.execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
+        let affected = conn.execute(
+            "UPDATE tasks SET is_deleted = 1,
+                              updated_at = datetime('now','localtime')
+             WHERE id = ?1 AND is_deleted = 0",
+            params![id],
+        )?;
         Ok(affected > 0)
     }
 
-    /// 批量删除任务（多选场景）。task_links 由 ON DELETE CASCADE 自动清理。
+    /// 批量删除任务（多选场景）。v43 起也走软删 tombstone。
     /// 返回实际删除条数；空 ids 返回 0。
     pub fn delete_tasks_by_ids(&self, ids: &[i64]) -> Result<usize, AppError> {
         if ids.is_empty() {
@@ -629,7 +650,12 @@ impl super::Database {
             .lock()
             .map_err(|e| AppError::Custom(e.to_string()))?;
         let placeholders = vec!["?"; ids.len()].join(",");
-        let sql = format!("DELETE FROM tasks WHERE id IN ({})", placeholders);
+        let sql = format!(
+            "UPDATE tasks SET is_deleted = 1,
+                              updated_at = datetime('now','localtime')
+             WHERE id IN ({}) AND is_deleted = 0",
+            placeholders
+        );
         let affected = conn.execute(&sql, rusqlite::params_from_iter(ids))?;
         Ok(affected)
     }
@@ -705,6 +731,7 @@ impl super::Database {
                    repeat_count, repeat_done_count, source_batch_id, category_id, parent_task_id
             FROM tasks
             WHERE status = 0
+              AND is_deleted = 0
               AND reminded_at IS NULL
               AND parent_task_id IS NULL
               AND due_date IS NOT NULL
@@ -741,10 +768,12 @@ impl super::Database {
                     source_batch_id: row.get(18)?,
                     category_id: row.get(19)?,
                     parent_task_id: row.get(20)?,
-                    // 提醒扫描内部不关心 kanban_stage / project_id / start_date，用默认值占位
+                    // 提醒扫描内部不关心这些字段，用默认值占位
                     kanban_stage: "todo".to_string(),
                     project_id: None,
                     start_date: None,
+                    stable_uuid: None,
+                    is_deleted: false,
                     subtask_done: 0,
                     subtask_total: 0,
                     links: Vec::new(),
@@ -771,6 +800,7 @@ impl super::Database {
             )) AS next_at
             FROM tasks
             WHERE status = 0
+              AND is_deleted = 0
               AND reminded_at IS NULL
               AND due_date IS NOT NULL
               AND remind_before_minutes IS NOT NULL
@@ -883,6 +913,148 @@ impl super::Database {
             params![batch_id],
         )?;
         Ok(affected)
+    }
+
+    // ─── 同步 V1 辅助 DAO（v43 引入，Phase D 时使用） ─────────────
+
+    /// 按 stable_uuid 找本地任务 id（sync pull 端用）。含墓碑行（is_deleted=1）。
+    #[allow(dead_code)]
+    pub fn get_task_id_by_stable_uuid(
+        &self,
+        stable_uuid: &str,
+    ) -> Result<Option<i64>, AppError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| AppError::Custom(e.to_string()))?;
+        let id: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM tasks WHERE stable_uuid = ?1",
+                params![stable_uuid],
+                |row| row.get(0),
+            )
+            .ok();
+        Ok(id)
+    }
+
+    /// 同步层用：列出全部主任务（含墓碑），不带 subtask 计数 / link 关联。
+    /// 子任务通过 list_subtasks_for_sync 单独取。
+    #[allow(dead_code)]
+    pub fn list_tasks_for_sync(&self) -> Result<Vec<Task>, AppError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| AppError::Custom(e.to_string()))?;
+        let mut stmt = conn.prepare(
+            "SELECT id, title, description, priority, important, status, due_date,
+                    completed_at, created_at, updated_at, remind_before_minutes, reminded_at,
+                    repeat_kind, repeat_interval, repeat_weekdays, repeat_until,
+                    repeat_count, repeat_done_count, source_batch_id, category_id,
+                    parent_task_id, kanban_stage, project_id, start_date,
+                    stable_uuid, is_deleted
+             FROM tasks
+             ORDER BY id ASC",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(Task {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    description: row.get(2)?,
+                    priority: row.get(3)?,
+                    important: row.get::<_, i32>(4)? != 0,
+                    status: row.get(5)?,
+                    due_date: row.get(6)?,
+                    completed_at: row.get(7)?,
+                    created_at: row.get(8)?,
+                    updated_at: row.get(9)?,
+                    remind_before_minutes: row.get(10)?,
+                    reminded_at: row.get(11)?,
+                    repeat_kind: row.get(12)?,
+                    repeat_interval: row.get(13)?,
+                    repeat_weekdays: row.get(14)?,
+                    repeat_until: row.get(15)?,
+                    repeat_count: row.get(16)?,
+                    repeat_done_count: row.get(17)?,
+                    source_batch_id: row.get(18)?,
+                    category_id: row.get(19)?,
+                    parent_task_id: row.get(20)?,
+                    kanban_stage: row.get(21)?,
+                    project_id: row.get(22)?,
+                    start_date: row.get(23)?,
+                    stable_uuid: row.get(24)?,
+                    is_deleted: row.get::<_, i32>(25)? != 0,
+                    subtask_done: 0,
+                    subtask_total: 0,
+                    links: Vec::new(),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// 同步 pull 端用：按已知 UUID 创建任务。
+    /// 与 create_task 区别：UUID 来自远端，updated_at 也用远端值（不冒泡到 now，
+    /// 避免 push/pull 反复震荡）。
+    #[allow(dead_code)]
+    pub fn create_task_with_uuid(
+        &self,
+        input: &CreateTaskInput,
+        stable_uuid: &str,
+        updated_at: &str,
+        status: i32,
+        completed_at: Option<&str>,
+        kanban_stage: &str,
+    ) -> Result<i64, AppError> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| AppError::Custom(e.to_string()))?;
+        let tx = conn.transaction()?;
+        let kind = input
+            .repeat_kind
+            .as_deref()
+            .filter(|k| !k.is_empty())
+            .unwrap_or("none")
+            .to_string();
+        let interval = input.repeat_interval.unwrap_or(1).max(1);
+        tx.execute(
+            "INSERT INTO tasks (title, description, priority, important, due_date,
+                                remind_before_minutes, repeat_kind, repeat_interval,
+                                repeat_weekdays, repeat_until, repeat_count,
+                                source_batch_id, category_id, parent_task_id,
+                                project_id, start_date, stable_uuid,
+                                status, completed_at, kanban_stage,
+                                created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+                     ?18, ?19, ?20, ?21, ?21)",
+            params![
+                input.title,
+                input.description,
+                input.priority.unwrap_or(1),
+                if input.important.unwrap_or(false) { 1 } else { 0 },
+                input.due_date,
+                input.remind_before_minutes,
+                kind,
+                interval,
+                input.repeat_weekdays,
+                input.repeat_until,
+                input.repeat_count,
+                input.source_batch_id,
+                input.category_id,
+                input.parent_task_id,
+                input.project_id,
+                input.start_date,
+                stable_uuid,
+                status,
+                completed_at,
+                kanban_stage,
+                updated_at,
+            ],
+        )?;
+        let task_id = tx.last_insert_rowid();
+        tx.commit()?;
+        Ok(task_id)
     }
 }
 

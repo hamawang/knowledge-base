@@ -3,7 +3,7 @@ use rusqlite::Connection;
 use crate::error::AppError;
 
 /// 当前 Schema 版本
-pub const SCHEMA_VERSION: i32 = 41;
+pub const SCHEMA_VERSION: i32 = 44;
 
 /// 获取数据库版本
 pub fn get_version(conn: &Connection) -> Result<i32, AppError> {
@@ -71,6 +71,9 @@ pub fn migrate(conn: &Connection) -> Result<(), AppError> {
             38 => migrate_v38_to_v39(conn)?,
             39 => migrate_v39_to_v40(conn)?,
             40 => migrate_v40_to_v41(conn)?,
+            41 => migrate_v41_to_v42(conn)?,
+            42 => migrate_v42_to_v43(conn)?,
+            43 => migrate_v43_to_v44(conn)?,
             _ => {
                 return Err(AppError::Custom(format!("未知的数据库版本: {}", version)));
             }
@@ -1662,5 +1665,167 @@ fn migrate_v39_to_v40(conn: &Connection) -> Result<(), AppError> {
     }
 
     set_version(conn, 40)?;
+    Ok(())
+}
+
+/// v41 -> v42: projects 跨端同步基础设施（stable_uuid + is_deleted 软删 + 远端状态表）
+///
+/// 设计与 notes 同套：UUID v4 由 Rust 侧生成（SQLite 没有内建），现有项目本次迁移
+/// 一次性回填；后续 `create_project` 同步生成。`is_deleted` 用 tombstone 模式代替物理
+/// 删除，让其他端能感知到"这个项目被删了"。
+///
+/// 新增 `sync_remote_state_project` 表：与 `sync_remote_state`（笔记用）结构对称，
+/// 记录每个 (backend_id, project_id) 上次同步的 hash / updated_at / 是否已删，用来
+/// 在 diff 时判断"内容是否变化"避免无意义 push。
+fn migrate_v41_to_v42(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v41 -> v42 (projects 跨端同步：stable_uuid + is_deleted + sync_remote_state_project)");
+
+    let cols = list_columns(conn, "projects")?;
+    if !cols.iter().any(|c| c == "stable_uuid") {
+        conn.execute_batch("ALTER TABLE projects ADD COLUMN stable_uuid TEXT;")?;
+    }
+    if !cols.iter().any(|c| c == "is_deleted") {
+        conn.execute_batch(
+            "ALTER TABLE projects ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
+
+    // backfill：对 stable_uuid IS NULL 的项目（幂等可重跑）生成 UUID v4
+    let mut stmt = conn.prepare("SELECT id FROM projects WHERE stable_uuid IS NULL")?;
+    let ids: Vec<i64> = stmt
+        .query_map([], |r| r.get::<_, i64>(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+    drop(stmt);
+    log::info!("[v42] 准备回填 {} 个项目的 stable_uuid", ids.len());
+    let tx = conn.unchecked_transaction()?;
+    for id in &ids {
+        let uuid = uuid::Uuid::new_v4().to_string();
+        tx.execute(
+            "UPDATE projects SET stable_uuid = ?1 WHERE id = ?2",
+            rusqlite::params![uuid, id],
+        )?;
+    }
+    tx.commit()?;
+
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_stable_uuid
+            ON projects(stable_uuid) WHERE stable_uuid IS NOT NULL;
+         CREATE INDEX IF NOT EXISTS idx_projects_is_deleted
+            ON projects(is_deleted);
+
+         CREATE TABLE IF NOT EXISTS sync_remote_state_project (
+            backend_id        INTEGER NOT NULL,
+            project_id        INTEGER NOT NULL,
+            remote_path       TEXT NOT NULL,
+            last_synced_hash  TEXT NOT NULL,
+            last_synced_at    TEXT NOT NULL,
+            last_synced_tombstone INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (backend_id, project_id)
+         );",
+    )?;
+
+    set_version(conn, 42)?;
+    Ok(())
+}
+
+/// v42 -> v43: tasks 跨端同步基础设施（stable_uuid + is_deleted + sync_remote_state_task）
+///
+/// tasks 此前是物理 DELETE，跨端同步需改成软删 tombstone：把 `delete_task` 改成
+/// `UPDATE is_deleted=1 + updated_at=now`，并在所有读路径加 `is_deleted=0` 过滤。
+///
+/// 字段范围（用户决策"全量版"）：
+/// - 主任务字段全部跨端：title/desc/priority/important/status/due_date/start_date/
+///   completed_at/remind_before_minutes/repeat_kind/repeat_interval/...
+/// - **不跨端**：reminded_at（本地提醒去重）/ repeat_done_count（本地推进，避免双端互推）/
+///   source_batch_id（本地批次标识）
+/// - 子任务（parent_task_id）通过 parent_task_uuid 跨端引用
+fn migrate_v42_to_v43(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v42 -> v43 (tasks 跨端同步：stable_uuid + is_deleted + sync_remote_state_task)");
+
+    let cols = list_columns(conn, "tasks")?;
+    if !cols.iter().any(|c| c == "stable_uuid") {
+        conn.execute_batch("ALTER TABLE tasks ADD COLUMN stable_uuid TEXT;")?;
+    }
+    if !cols.iter().any(|c| c == "is_deleted") {
+        conn.execute_batch(
+            "ALTER TABLE tasks ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
+
+    let mut stmt = conn.prepare("SELECT id FROM tasks WHERE stable_uuid IS NULL")?;
+    let ids: Vec<i64> = stmt
+        .query_map([], |r| r.get::<_, i64>(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+    drop(stmt);
+    log::info!("[v43] 准备回填 {} 个任务的 stable_uuid", ids.len());
+    let tx = conn.unchecked_transaction()?;
+    for id in &ids {
+        let uuid = uuid::Uuid::new_v4().to_string();
+        tx.execute(
+            "UPDATE tasks SET stable_uuid = ?1 WHERE id = ?2",
+            rusqlite::params![uuid, id],
+        )?;
+    }
+    tx.commit()?;
+
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_stable_uuid
+            ON tasks(stable_uuid) WHERE stable_uuid IS NOT NULL;
+         CREATE INDEX IF NOT EXISTS idx_tasks_is_deleted
+            ON tasks(is_deleted);
+
+         CREATE TABLE IF NOT EXISTS sync_remote_state_task (
+            backend_id        INTEGER NOT NULL,
+            task_id           INTEGER NOT NULL,
+            remote_path       TEXT NOT NULL,
+            last_synced_hash  TEXT NOT NULL,
+            last_synced_at    TEXT NOT NULL,
+            last_synced_tombstone INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (backend_id, task_id)
+         );",
+    )?;
+
+    set_version(conn, 43)?;
+    Ok(())
+}
+
+/// v43 -> v44: task_categories 跨端识别（stable_uuid）
+///
+/// 让"用户在 A 端把分类「工作」重命名为「Work」"也能跨端识别为同一个分类。
+/// 不加 is_deleted —— 分类是辅助元数据，删除时任务自动落到"未分类"（ON DELETE SET NULL），
+/// 跨端只关心"存在性 + 名称变化"，不需要 tombstone。
+fn migrate_v43_to_v44(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v43 -> v44 (task_categories.stable_uuid 跨端识别)");
+
+    let cols = list_columns(conn, "task_categories")?;
+    if !cols.iter().any(|c| c == "stable_uuid") {
+        conn.execute_batch("ALTER TABLE task_categories ADD COLUMN stable_uuid TEXT;")?;
+    }
+
+    let mut stmt = conn.prepare("SELECT id FROM task_categories WHERE stable_uuid IS NULL")?;
+    let ids: Vec<i64> = stmt
+        .query_map([], |r| r.get::<_, i64>(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+    drop(stmt);
+    log::info!("[v44] 准备回填 {} 个任务分类的 stable_uuid", ids.len());
+    let tx = conn.unchecked_transaction()?;
+    for id in &ids {
+        let uuid = uuid::Uuid::new_v4().to_string();
+        tx.execute(
+            "UPDATE task_categories SET stable_uuid = ?1 WHERE id = ?2",
+            rusqlite::params![uuid, id],
+        )?;
+    }
+    tx.commit()?;
+
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_task_categories_stable_uuid
+            ON task_categories(stable_uuid) WHERE stable_uuid IS NOT NULL;",
+    )?;
+
+    set_version(conn, 44)?;
     Ok(())
 }
