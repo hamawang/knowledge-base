@@ -103,6 +103,9 @@ function SortableTableRow(
     transform: CSS.Transform.toString(transform),
     transition,
     cursor: "grab",
+    // 行内禁止鼠标拖选文本：列表是可拖排的，文本选择会和拖拽手势冲突，观感也乱
+    userSelect: "none",
+    WebkitUserSelect: "none",
     ...(isDragging
       ? { position: "relative" as const, zIndex: 999, opacity: 0.7 }
       : {}),
@@ -923,12 +926,12 @@ function DesktopNoteListPage() {
     [loadNotes],
   );
 
-  // ─── DnD 自定义排序（仅 list + sortBy=custom） ──────
+  // ─── DnD 拖拽排序（list 视图始终启用） ──────
+  // 任何排序模式下都可拖；首次在非 custom 模式拖动会自动切到 custom 并提示用户。
   // PointerSensor 设 5px 激活距离，防止 click 误触发拖拽（checkbox / 行 click 仍正常）
   const dndSensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
   );
-  const dndEnabled = viewMode === "list" && sortBy === "custom";
 
   const handleDragEnd = useCallback(
     async (event: DragEndEvent) => {
@@ -949,17 +952,42 @@ function DesktopNoteListPage() {
         );
         return;
       }
+      // 乐观更新当前页（用户立即看到拖动效果）
       const reordered = arrayMove(data.items, oldIdx, newIdx);
-      // 乐观更新
       setData((prev) => ({ ...prev, items: reordered }));
       try {
-        await noteApi.reorder(reordered.map((n) => n.id));
+        // 关键：必须用当前筛选条件下的「全量」id 列表 reorder，
+        // 仅传当前页 12 条会让其它页 sort_order 撞车（0/1000/...重复），
+        // 切到 custom 排序后顺序就乱了。
+        const isUncategorized = folderId === "uncategorized";
+        const fullIds = await noteApi.listIdsForReorder({
+          keyword: keyword || undefined,
+          folder_id: isUncategorized
+            ? undefined
+            : folderId
+              ? Number(folderId)
+              : undefined,
+          uncategorized: isUncategorized || undefined,
+          sort_by: sortBy,
+        });
+        const fullOldIdx = fullIds.indexOf(Number(active.id));
+        const fullNewIdx = fullIds.indexOf(Number(over.id));
+        if (fullOldIdx < 0 || fullNewIdx < 0) {
+          throw new Error("拖动的笔记不在当前可见集合中");
+        }
+        const fullReordered = arrayMove(fullIds, fullOldIdx, fullNewIdx);
+        await noteApi.reorder(fullReordered);
+        // 非自定义排序下首次拖动 → 自动切到 custom
+        if (sortBy !== "custom") {
+          setSortBy("custom");
+          message.info("已切换为自定义排序");
+        }
       } catch (e) {
         message.error(`排序保存失败：${e}`);
         loadNotes(data.page);
       }
     },
-    [data.items, data.page, loadNotes],
+    [data.items, data.page, loadNotes, sortBy, keyword, folderId],
   );
 
   // ─── 列表行右键菜单 ──────────────────────────
@@ -1490,68 +1518,42 @@ function DesktopNoteListPage() {
             />
           </div>
           <div className="flex-1 min-h-0 overflow-auto">
-            {dndEnabled ? (
-              <DndContext
-                sensors={dndSensors}
-                collisionDetection={closestCenter}
-                onDragEnd={handleDragEnd}
+            <DndContext
+              sensors={dndSensors}
+              collisionDetection={closestCenter}
+              onDragEnd={handleDragEnd}
+            >
+              <SortableContext
+                items={data.items.map((n) => String(n.id))}
+                strategy={verticalListSortingStrategy}
               >
-                <SortableContext
-                  items={data.items.map((n) => String(n.id))}
-                  strategy={verticalListSortingStrategy}
-                >
-                  <Table
-                    columns={columns}
-                    dataSource={data.items}
-                    rowKey="id"
-                    loading={loading}
-                    size="small"
-                    pagination={false}
-                    sticky
-                    rowSelection={{
-                      selectedRowKeys: selectedIds,
-                      onChange: (keys) =>
-                        setSelectedIds(keys.map((k) => Number(k))),
-                      columnWidth: 40,
-                    }}
-                    components={{ body: { row: SortableTableRow } }}
-                    onRow={(record) => ({
-                      onContextMenu: (e: React.MouseEvent) => {
-                        e.preventDefault();
-                        noteCtx.open(
-                          { clientX: e.clientX, clientY: e.clientY },
-                          record,
-                        );
-                      },
-                    })}
-                  />
-                </SortableContext>
-              </DndContext>
-            ) : (
-              <Table
-                columns={columns}
-                dataSource={data.items}
-                rowKey="id"
-                loading={loading}
-                size="small"
-                pagination={false}
-                sticky
-                rowSelection={{
-                  selectedRowKeys: selectedIds,
-                  onChange: (keys) => setSelectedIds(keys.map((k) => Number(k))),
-                  columnWidth: 40,
-                }}
-                onRow={(record) => ({
-                  onContextMenu: (e) => {
-                    e.preventDefault();
-                    noteCtx.open(
-                      { clientX: e.clientX, clientY: e.clientY },
-                      record,
-                    );
-                  },
-                })}
-              />
-            )}
+                <Table
+                  columns={columns}
+                  dataSource={data.items}
+                  rowKey="id"
+                  loading={loading}
+                  size="small"
+                  pagination={false}
+                  sticky
+                  rowSelection={{
+                    selectedRowKeys: selectedIds,
+                    onChange: (keys) =>
+                      setSelectedIds(keys.map((k) => Number(k))),
+                    columnWidth: 40,
+                  }}
+                  components={{ body: { row: SortableTableRow } }}
+                  onRow={(record) => ({
+                    onContextMenu: (e: React.MouseEvent) => {
+                      e.preventDefault();
+                      noteCtx.open(
+                        { clientX: e.clientX, clientY: e.clientY },
+                        record,
+                      );
+                    },
+                  })}
+                />
+              </SortableContext>
+            </DndContext>
           </div>
           <div
             className="flex-shrink-0 flex justify-end items-center px-3 py-2"

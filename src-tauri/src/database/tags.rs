@@ -30,6 +30,9 @@ impl Database {
     // ─── 标签 DAO ─────────────────────────────────
 
     /// 创建标签（可指定父标签 id 形成树形结构）
+    ///
+    /// sort_order 自动落到同 parent 内末尾（MAX+1000），跟 folders/notes 同套间隔策略。
+    /// COALESCE(?3, -1) 用 -1 兜底比较 NULL，避免 SQL NULL 不可比导致同 parent 判定漏匹配。
     pub fn create_tag(
         &self,
         name: &str,
@@ -42,7 +45,13 @@ impl Database {
             .map_err(|e| AppError::Custom(e.to_string()))?;
 
         conn.execute(
-            "INSERT INTO tags (name, color, parent_id) VALUES (?1, ?2, ?3)",
+            "INSERT INTO tags (name, color, parent_id, sort_order)
+             VALUES (?1, ?2, ?3,
+                COALESCE(
+                    (SELECT MAX(sort_order) FROM tags
+                     WHERE COALESCE(parent_id, -1) = COALESCE(?3, -1)),
+                    -1000
+                ) + 1000)",
             params![name, color, parent_id],
         )?;
 
@@ -59,7 +68,8 @@ impl Database {
 
     /// 获取所有标签（带笔记计数 + parent_id）
     ///
-    /// 排序改为按 name 字母序：树形展示下"按热度排序"会破坏父子相邻关系。
+    /// 排序：先按 parent_id（让同级相邻便于前端组树），再按 sort_order 自定义顺序，
+    /// 最后 name 字母序兜底（sort_order 全 0 的旧库 / 同 sort_order 时稳定输出）。
     /// 由前端在内存中重组成树（避免后端做递归 CTE，前端组装更灵活）。
     pub fn list_tags(&self) -> Result<Vec<Tag>, AppError> {
         let conn = self
@@ -73,7 +83,7 @@ impl Database {
              LEFT JOIN note_tags nt ON t.id = nt.tag_id
              LEFT JOIN notes n ON nt.note_id = n.id AND n.is_deleted = 0
              GROUP BY t.id
-             ORDER BY t.name COLLATE NOCASE",
+             ORDER BY COALESCE(t.parent_id, -1), t.sort_order, t.name COLLATE NOCASE",
         )?;
 
         let tags = stmt
@@ -141,13 +151,47 @@ impl Database {
             }
         }
 
+        // 移到新父级时，sort_order 重置到新 parent 内末尾（MAX+1000），
+        // 否则会保留旧 parent 下的 sort_order 值，可能跟新邻居撞车
         let affected = conn.execute(
-            "UPDATE tags SET parent_id = ?1 WHERE id = ?2",
+            "UPDATE tags
+             SET parent_id = ?1,
+                 sort_order = COALESCE(
+                     (SELECT MAX(sort_order) FROM tags t2
+                      WHERE COALESCE(t2.parent_id, -1) = COALESCE(?1, -1)
+                        AND t2.id != ?2),
+                     -1000
+                 ) + 1000
+             WHERE id = ?2",
             params![parent_id, id],
         )?;
         if affected == 0 {
             return Err(AppError::NotFound(format!("标签 {} 不存在", id)));
         }
+        Ok(())
+    }
+
+    /// 批量重排同级标签的 sort_order（按给定顺序赋值 0/1000/2000…）
+    ///
+    /// 调用约定：`ordered_ids` 是**同一 parent**（或同为顶层）下的标签 ID 完整顺序。
+    /// 不校验 parent 一致性——前端拿到该 parent 下当前全部子标签后调用即可。
+    /// 间隔 1000 留给未来插队（参考 notes.set_note_sort_orders / folders.set_folder_sort_orders）。
+    pub fn set_tag_sort_orders(&self, ordered_ids: &[i64]) -> Result<(), AppError> {
+        if ordered_ids.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| AppError::Custom(e.to_string()))?;
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare("UPDATE tags SET sort_order = ?1 WHERE id = ?2")?;
+            for (i, id) in ordered_ids.iter().enumerate() {
+                stmt.execute(params![(i as i64) * 1000, id])?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 

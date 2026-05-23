@@ -6,6 +6,7 @@ import {
   Form,
   Input,
   Tree,
+  TreeSelect,
   message,
   theme as antdTheme,
 } from "antd";
@@ -17,8 +18,12 @@ import {
   Edit3,
   Trash2,
   FolderUp,
+  ChevronsDown,
+  ChevronsUp,
+  CornerDownRight,
 } from "lucide-react";
 import { tagApi } from "@/lib/api";
+import { buildTagTreeSelectData } from "@/lib/tagTree";
 import { useAppStore } from "@/store";
 import { TagColorPicker, TAG_COLORS } from "@/components/TagColorPicker";
 import { MicButton } from "@/components/MicButton";
@@ -58,7 +63,11 @@ export function TagsPanel() {
   const [tags, setTags] = useState<Tag[]>([]);
   const [filter, setFilter] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
-  const [form] = Form.useForm<{ name: string; color: string }>();
+  const [form] = Form.useForm<{
+    name: string;
+    color: string;
+    parent_id?: number | null;
+  }>();
   const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
 
   // ─── Inline 重命名状态 ────────────────────────
@@ -85,6 +94,9 @@ export function TagsPanel() {
     () => buildTreeData(tags, filter.trim().toLowerCase()),
     [tags, filter],
   );
+
+  // 新建弹窗"父标签"下拉用：完整层级（不带 filter），value 用数字 id
+  const parentTreeData = useMemo(() => buildTagTreeSelectData(tags), [tags]);
 
   // 筛选时自动展开命中节点的祖先链；清空筛选恢复用户原状态
   useEffect(() => {
@@ -138,35 +150,130 @@ export function TagsPanel() {
     }
   }
 
-  async function handleCreate(values: { name: string; color: string }) {
+  async function handleCreate(values: {
+    name: string;
+    color: string;
+    parent_id?: number | null;
+  }) {
     try {
-      await tagApi.create(values.name, values.color);
+      await tagApi.create(
+        values.name,
+        values.color,
+        values.parent_id ?? null,
+      );
       message.success("已创建");
       setModalOpen(false);
       form.resetFields();
+      // 父节点要展开，让新建的子标签可见
+      if (values.parent_id != null) {
+        setExpandedKeys((prev) =>
+          prev.includes(String(values.parent_id))
+            ? prev
+            : [...prev, String(values.parent_id)],
+        );
+      }
       useAppStore.getState().bumpTagsRefresh();
     } catch (e) {
       message.error(String(e));
     }
   }
 
+  /** 打开新建弹窗，可预设父标签（右键"新建子标签"/"新建同级"用） */
+  function openCreateModal(parentId: number | null) {
+    form.resetFields();
+    form.setFieldsValue({ parent_id: parentId });
+    setModalOpen(true);
+  }
+
+  /** 展开/折叠以 rootId 为根的整棵子树（含 rootId 本身） */
+  function toggleExpandAll(rootId: number, expand: boolean) {
+    const allKeys = [
+      String(rootId),
+      ...getDescendantIds(tags, rootId).map(String),
+    ];
+    setExpandedKeys((prev) => {
+      if (expand) {
+        return Array.from(new Set([...prev, ...allKeys]));
+      }
+      const set = new Set(allKeys);
+      return prev.filter((k) => !set.has(k));
+    });
+  }
+
   /** 标签拖拽放置：
-   * - dropToGap=false（落在节点上）→ 拖动项变为 dropNode 的子
-   * - dropToGap=true（落在节点之间）→ 拖动项变为 dropNode 的兄弟（共享 parent_id）
+   * - dropToGap=false（落在节点上）→ 拖动项变为 dropNode 的子（sort_order 自动落新 parent 末尾）
+   * - dropToGap=true 同 parent（落在节点之间）→ 纯同级排序，调 reorder
+   * - dropToGap=true 跨 parent → 先 setParent 改归属，再 reorder 调整位置
+   *
+   * relativeDrop 用 antd 经典算法（dropPosition - dropNode 自身索引）：
+   *   -1 = 放在 dropNode 上方, 0 = 作为子, +1 = 放在下方
    */
   async function handleDrop(info: {
     dragNode: { key: React.Key };
-    node: { key: React.Key };
+    node: { key: React.Key; pos: string };
+    dropPosition: number;
     dropToGap: boolean;
   }) {
     const dragId = Number(info.dragNode.key);
     const dropId = Number(info.node.key);
+    if (dragId === dropId) return; // 自环
+    const dragTag = tags.find((t) => t.id === dragId);
     const dropTag = tags.find((t) => t.id === dropId);
-    if (!dropTag) return;
-    const newParentId = info.dropToGap ? dropTag.parent_id : dropId;
-    if (newParentId === dragId) return; // 已经被 set_tag_parent 拒绝，但前端先省一次 IPC
+    if (!dragTag || !dropTag) return;
+
+    // 落在节点上 → 作为子（setParent 自动落新 parent 末尾，不需要 reorder）
+    if (!info.dropToGap) {
+      try {
+        await tagApi.setParent(dragId, dropId);
+        useAppStore.getState().bumpTagsRefresh();
+      } catch (e) {
+        message.error(`移动失败：${e}`);
+      }
+      return;
+    }
+
+    // 落在间隙 → 同级排序
+    const newParentId = dropTag.parent_id;
+    const oldParentId = dragTag.parent_id;
+
+    // antd dropPosition 减去 dropNode 在父 children 中的索引 = "相对位置"（-1/0/+1）
+    const dropPosArr = info.node.pos.split("-");
+    const dropNodeIdx = Number(dropPosArr[dropPosArr.length - 1]);
+    const relativeDrop = info.dropPosition - dropNodeIdx;
+
+    // tags 已 ORDER BY parent_id, sort_order，按 parent 过滤即可得正确顺序
+    const siblings = tags.filter(
+      (t) =>
+        (t.parent_id ?? null) === (newParentId ?? null) && t.id !== dragId,
+    );
+    const dropIdx = siblings.findIndex((t) => t.id === dropId);
+    if (dropIdx === -1) {
+      // 跨 parent 异常兜底：直接 setParent 让其落新 parent 末尾
+      if (newParentId !== oldParentId) {
+        try {
+          await tagApi.setParent(dragId, newParentId);
+          useAppStore.getState().bumpTagsRefresh();
+        } catch (e) {
+          message.error(`移动失败：${e}`);
+        }
+      }
+      return;
+    }
+
+    // relativeDrop < 0 = 插到 dropTag 之前；>= 0 = 插到之后
+    const insertIdx = relativeDrop < 0 ? dropIdx : dropIdx + 1;
+    const newOrder = [
+      ...siblings.slice(0, insertIdx),
+      dragTag,
+      ...siblings.slice(insertIdx),
+    ].map((t) => t.id);
+
     try {
-      await tagApi.setParent(dragId, newParentId);
+      // 跨 parent 拖：先 setParent 改归属，再 reorder 覆盖 sort_order 到正确位置
+      if (newParentId !== oldParentId) {
+        await tagApi.setParent(dragId, newParentId);
+      }
+      await tagApi.reorder(newOrder);
       useAppStore.getState().bumpTagsRefresh();
     } catch (e) {
       message.error(`移动失败：${e}`);
@@ -202,7 +309,54 @@ export function TagsPanel() {
   const tagMenuItems: ContextMenuEntry[] = useMemo(() => {
     const p = ctx.state.payload;
     if (!p) return [];
+
+    // 是否有子标签 + 当前子树是否已全展开（含 root 自身），决定"展开/折叠所有子标签"行为
+    const hasKids = tags.some((t) => t.parent_id === p.id);
+    const descendantIds = hasKids ? getDescendantIds(tags, p.id) : [];
+    const allExpanded =
+      hasKids &&
+      expandedKeys.includes(String(p.id)) &&
+      descendantIds.every((id) => expandedKeys.includes(String(id)));
+
     const items: ContextMenuEntry[] = [
+      {
+        key: "new-child",
+        label: "在此下方新建子标签",
+        icon: <CornerDownRight size={13} />,
+        onClick: () => {
+          ctx.close();
+          openCreateModal(p.id);
+        },
+      },
+      {
+        key: "new-sibling",
+        label: "新建同级标签",
+        icon: <Plus size={13} />,
+        onClick: () => {
+          ctx.close();
+          openCreateModal(p.parentId);
+        },
+      },
+    ];
+
+    if (hasKids) {
+      items.push({
+        key: "toggle-expand-all",
+        label: allExpanded ? "折叠所有子标签" : "展开所有子标签",
+        icon: allExpanded ? (
+          <ChevronsUp size={13} />
+        ) : (
+          <ChevronsDown size={13} />
+        ),
+        onClick: () => {
+          ctx.close();
+          toggleExpandAll(p.id, !allExpanded);
+        },
+      });
+    }
+
+    items.push(
+      { type: "divider" },
       {
         key: "rename",
         label: "重命名",
@@ -213,7 +367,7 @@ export function TagsPanel() {
           if (tag) startEdit(tag);
         },
       },
-    ];
+    );
     if (p.parentId != null) {
       items.push({
         key: "promote",
@@ -322,7 +476,7 @@ export function TagsPanel() {
     );
     return items;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ctx, tags, selectedId, navigate, token]);
+  }, [ctx, tags, expandedKeys, selectedId, navigate, token]);
 
   /** Tree titleRender：单行 = 色块 + 名称（inline 编辑切换）+ 计数 + active 勾 */
   const renderTitle = (node: DataNode) => {
@@ -331,8 +485,17 @@ export function TagsPanel() {
     const active = selectedId === tag.id;
     const ctxActive = ctx.state.payload?.id === tag.id;
     const isEditing = editingId === tag.id;
+    // hover / 选中 / 右键背景统一交给 .tag-row CSS 画，确保形状一致（见 global.css）
+    const rowClass = [
+      "tag-row",
+      active && "is-active",
+      ctxActive && "is-ctx-active",
+    ]
+      .filter(Boolean)
+      .join(" ");
     return (
       <div
+        className={rowClass}
         onClick={(e) => {
           if (isEditing) return;
           e.stopPropagation(); // antd Tree 默认会触发 selectable=false 的 onSelect 不必要副作用
@@ -358,14 +521,7 @@ export function TagsPanel() {
           alignItems: "center",
           gap: 8,
           padding: "2px 6px",
-          borderRadius: 4,
-          background: active ? `${token.colorPrimary}14` : "transparent",
-          color: active ? token.colorPrimary : token.colorText,
-          fontWeight: active ? 500 : undefined,
           fontSize: 13,
-          outline: ctxActive ? `1px solid ${token.colorPrimary}` : "none",
-          outlineOffset: -1,
-          transition: "background .15s, outline .1s",
           minHeight: 22,
         }}
       >
@@ -439,7 +595,7 @@ export function TagsPanel() {
 
   return (
     <div
-      className="flex flex-col h-full"
+      className="tags-tree-panel flex flex-col h-full"
       style={{ overflow: "hidden" }}
       onContextMenu={(e) => {
         const t = e.target as HTMLElement;
@@ -470,10 +626,7 @@ export function TagsPanel() {
           type="text"
           size="small"
           icon={<Plus size={14} />}
-          onClick={() => {
-            form.resetFields();
-            setModalOpen(true);
-          }}
+          onClick={() => openCreateModal(null)}
           style={{ width: 24, height: 24, padding: 0 }}
           title="新建标签"
         />
@@ -516,10 +669,7 @@ export function TagsPanel() {
                 <span
                   className="cursor-pointer"
                   style={{ color: token.colorPrimary, fontSize: 11 }}
-                  onClick={() => {
-                    form.resetFields();
-                    setModalOpen(true);
-                  }}
+                  onClick={() => openCreateModal(null)}
                 >
                   + 新建标签
                 </span>
@@ -561,7 +711,21 @@ export function TagsPanel() {
             label="标签名称"
             rules={[{ required: true, message: "请输入标签名称" }]}
           >
-            <Input placeholder="输入标签名称" />
+            <Input placeholder="输入标签名称" autoFocus />
+          </Form.Item>
+          <Form.Item
+            name="parent_id"
+            label="父标签"
+            tooltip="留空 = 顶层标签；选定后将作为该标签的子节点"
+          >
+            <TreeSelect
+              allowClear
+              placeholder="不选则为顶层标签"
+              treeData={parentTreeData}
+              treeDefaultExpandAll
+              showSearch
+              treeNodeFilterProp="title"
+            />
           </Form.Item>
           <Form.Item name="color" label="颜色" initialValue="#1677ff">
             <TagColorPicker />
@@ -631,3 +795,23 @@ function buildTreeData(
     autoExpandKeys: Array.from(autoExpand),
   };
 }
+
+/** 收集 rootId 子树下所有后代 id（不含 rootId 自身）。迭代版避免深嵌套爆栈。 */
+function getDescendantIds(tags: Tag[], rootId: number): number[] {
+  const childrenByParent = new Map<number, number[]>();
+  for (const t of tags) {
+    if (t.parent_id == null) continue;
+    if (!childrenByParent.has(t.parent_id)) childrenByParent.set(t.parent_id, []);
+    childrenByParent.get(t.parent_id)!.push(t.id);
+  }
+  const result: number[] = [];
+  const stack: number[] = [...(childrenByParent.get(rootId) ?? [])];
+  while (stack.length) {
+    const id = stack.pop()!;
+    result.push(id);
+    const kids = childrenByParent.get(id);
+    if (kids) stack.push(...kids);
+  }
+  return result;
+}
+

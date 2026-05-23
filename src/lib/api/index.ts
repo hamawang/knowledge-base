@@ -214,6 +214,9 @@ export const noteApi = {
   /** 批量重排同 folder 内笔记的 sort_order；调用方传该 folder 内**完整**的 ID 顺序 */
   reorder: (orderedIds: number[]) =>
     invoke<void>("reorder_notes", { orderedIds }),
+  /** 拖拽排序专用：拿当前筛选条件下「全部」笔记 id（不分页），用于本地 arrayMove 后整体 reorder */
+  listIdsForReorder: (query: NoteQuery = {}) =>
+    invoke<number[]>("list_note_ids_for_reorder", { query }),
   /** 批量移动笔记到指定文件夹（folderId=null 表示根目录）；返回实际移动的条数 */
   moveBatch: (ids: number[], folderId: number | null) =>
     invoke<number>("move_notes_batch", { ids, folderId }),
@@ -393,6 +396,9 @@ export const tagApi = {
   /** 移动标签到新父级；parentId=null 提升为顶层 */
   setParent: (id: number, parentId: number | null) =>
     invoke<void>("set_tag_parent", { id, parentId }),
+  /** 批量重排同级标签：orderedIds 为同一 parent（或全顶层）下完整 ID 顺序，按 idx*1000 赋 sort_order */
+  reorder: (orderedIds: number[]) =>
+    invoke<void>("reorder_tags", { orderedIds }),
   delete: (id: number) => invoke<void>("delete_tag", { id }),
   addToNote: (noteId: number, tagId: number) =>
     invoke<void>("add_tag_to_note", { noteId, tagId }),

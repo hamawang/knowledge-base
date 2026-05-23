@@ -29,6 +29,11 @@ impl TagService {
         db.set_tag_parent(id, parent_id)
     }
 
+    /// 批量重排同级标签（按给定顺序赋 sort_order = idx*1000）
+    pub fn reorder(db: &Database, ordered_ids: &[i64]) -> Result<(), AppError> {
+        db.set_tag_sort_orders(ordered_ids)
+    }
+
     /// 获取所有标签
     pub fn list(db: &Database) -> Result<Vec<Tag>, AppError> {
         db.list_tags()

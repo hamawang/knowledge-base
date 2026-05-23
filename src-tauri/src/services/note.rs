@@ -95,6 +95,18 @@ impl NoteService {
         db.reorder_notes(ordered_ids)
     }
 
+    /// 拖拽排序用：取当前筛选条件下**全部**笔记 id（不分页），按当前 sort_by 排序。
+    /// 前端拿到完整 id 列表后做 arrayMove → reorder，保证跨页 sort_order 一致。
+    pub fn list_ids_for_reorder(db: &Database, query: &NoteQuery) -> Result<Vec<i64>, AppError> {
+        db.list_note_ids_for_reorder(
+            query.folder_id,
+            query.keyword.as_deref(),
+            query.uncategorized.unwrap_or(false),
+            query.include_descendants.unwrap_or(true),
+            query.sort_by.as_deref(),
+        )
+    }
+
     /// 全部移到回收站（软删，可在回收站恢复）
     pub fn trash_all(db: &Database) -> Result<usize, AppError> {
         db.trash_all_notes()

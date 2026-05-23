@@ -23,9 +23,17 @@ impl Database {
         let normalized = crate::database::links::normalize_title(&input.title);
         let content_hash = crate::services::hash::sha256_hex(&input.content);
         let stable_uuid = uuid::Uuid::new_v4().to_string();
+        // 自定义排序下新笔记排在所属 folder 末尾：MAX(sort_order)+1000
+        // 避免和用户拖排到第一位的笔记(sort_order=0)撞车 → "第一名"被新建吞掉
+        // folder_id 用 ?3，子查询里复用同一参数（COALESCE 用 -1 兜底 NULL 比较）
         conn.execute(
-            "INSERT INTO notes (title, content, folder_id, title_normalized, content_hash, stable_uuid)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO notes (title, content, folder_id, title_normalized, content_hash, stable_uuid, sort_order)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6,
+                COALESCE(
+                    (SELECT MAX(sort_order) FROM notes
+                     WHERE COALESCE(folder_id, -1) = COALESCE(?3, -1) AND is_deleted = 0),
+                    -1000
+                ) + 1000)",
             params![
                 input.title,
                 input.content,
@@ -853,6 +861,89 @@ impl Database {
         )?;
 
         Ok(is_pinned)
+    }
+
+    /// 拿到当前筛选条件下「全部」笔记的 id 列表（不分页），按 sort_by 排序。
+    ///
+    /// 拖拽排序专用：前端只看到当前页 12 条笔记，但 reorder 必须覆盖
+    /// **整个可见集合**的 ID，否则跨页 sort_order 会被踩到 0/1000/… 撞车。
+    /// WHERE 条件与 list_notes 保持完全一致。
+    pub fn list_note_ids_for_reorder(
+        &self,
+        folder_id: Option<i64>,
+        keyword: Option<&str>,
+        uncategorized: bool,
+        include_descendants: bool,
+        sort_by: Option<&str>,
+    ) -> Result<Vec<i64>, AppError> {
+        let folder_ids: Option<Vec<i64>> = if let Some(fid) = folder_id {
+            if include_descendants {
+                Some(self.collect_descendant_folder_ids(fid)?)
+            } else {
+                Some(vec![fid])
+            }
+        } else {
+            None
+        };
+
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| AppError::Custom(e.to_string()))?;
+
+        let mut conditions = vec![
+            "is_deleted = 0".to_string(),
+            "is_hidden = 0".to_string(),
+            "is_daily = 0".to_string(),
+        ];
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        if let Some(ids) = folder_ids {
+            if ids.len() == 1 {
+                conditions.push(format!("folder_id = ?{}", param_values.len() + 1));
+                param_values.push(Box::new(ids[0]));
+            } else {
+                let start = param_values.len() + 1;
+                let placeholders: String = (start..start + ids.len())
+                    .map(|i| format!("?{}", i))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                conditions.push(format!("folder_id IN ({})", placeholders));
+                for id in ids {
+                    param_values.push(Box::new(id));
+                }
+            }
+        } else if uncategorized {
+            conditions.push("folder_id IS NULL".to_string());
+        }
+
+        if let Some(kw) = keyword {
+            if !kw.is_empty() {
+                conditions.push(format!("title LIKE ?{}", param_values.len() + 1));
+                param_values.push(Box::new(format!("%{}%", kw)));
+            }
+        }
+
+        let where_clause = format!("WHERE {}", conditions.join(" AND "));
+        let order_clause = match sort_by.unwrap_or("default") {
+            "custom" => "is_pinned DESC, sort_order ASC, updated_at DESC",
+            "created" => "is_pinned DESC, created_at DESC, updated_at DESC",
+            "title" => "is_pinned DESC, title COLLATE NOCASE ASC, updated_at DESC",
+            _ => "is_pinned DESC, updated_at DESC",
+        };
+
+        let sql = format!(
+            "SELECT id FROM notes {} ORDER BY {}",
+            where_clause, order_clause
+        );
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+
+        let mut stmt = conn.prepare(&sql)?;
+        let ids = stmt
+            .query_map(params_ref.as_slice(), |row| row.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ids)
     }
 
     /// 批量重排笔记的 sort_order（同 folder 内一次性按给定顺序赋值 0/1000/2000…）

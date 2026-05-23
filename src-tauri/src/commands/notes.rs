@@ -75,6 +75,16 @@ pub fn reorder_notes(
     NoteService::reorder(&state.db, &ordered_ids).map_err(|e| e.to_string())
 }
 
+/// 取当前筛选条件下「全部」笔记 id（不分页），按当前 sort_by 排序。
+/// 拖拽排序专用：前端拿完整 id 列表后再 reorder，避免按页 reorder 导致跨页撞车。
+#[tauri::command]
+pub fn list_note_ids_for_reorder(
+    state: tauri::State<'_, AppState>,
+    query: NoteQuery,
+) -> Result<Vec<i64>, String> {
+    NoteService::list_ids_for_reorder(&state.db, &query).map_err(|e| e.to_string())
+}
+
 /// 批量移动笔记到文件夹；返回实际移动的条数
 /// folder_id = None 表示移到根目录
 #[tauri::command]

@@ -306,6 +306,26 @@ body,
   white-space: nowrap;
 }
 
+/* 编辑器顶部左侧：返回按钮 + 右边竖向堆叠的小字（更新时间/保存状态） */
+.editor-topbar__left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.editor-topbar__meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 1px;
+  line-height: 1.2;
+  /* 不折行，溢出更小（保存状态最长就 "已自动保存 1 分钟前"） */
+}
+.editor-topbar__meta .ant-typography {
+  white-space: nowrap;
+}
+
 .editor-body {
   flex: 1;
   overflow-y: auto;
@@ -2135,4 +2155,42 @@ body,
 }
 .ai-markdown ul li input[type="checkbox"] {
   margin-right: 6px;
+}
+
+/* ─── 标签面板：行 hover / 选中 / 右键 态统一为同形状圆角 ──
+ * 原本两层各画各的背景——antd Tree wrapper 默认 hover 画"直角灰矩形"，
+ * 自定义 div 画"圆角浅紫矩形"，形状/颜色对不上看着别扭。
+ * 解决方案：把 antd 默认 hover 背景去掉，统一交给 .tag-row 画，
+ * hover / active / 右键三态都用同样的圆角 + 同色系深浅变化。 */
+.tags-tree-panel .ant-tree-node-content-wrapper {
+  padding: 0 !important;
+}
+.tags-tree-panel .ant-tree-node-content-wrapper:hover {
+  background: transparent !important;
+}
+.tags-tree-panel .ant-tree-node-content-wrapper.ant-tree-node-selected {
+  background: transparent !important;
+}
+
+.tags-tree-panel .tag-row {
+  border-radius: 4px;
+  color: var(--ant-color-text, #000);
+  outline: 1px solid transparent;
+  outline-offset: -1px;
+  transition: background 0.15s ease, outline 0.1s ease, color 0.15s ease;
+}
+.tags-tree-panel .tag-row:hover {
+  background: var(--ant-control-item-bg-hover, rgba(0, 0, 0, 0.04));
+}
+.tags-tree-panel .tag-row.is-active {
+  background: var(--ant-color-primary-bg, rgba(22, 119, 255, 0.1));
+  color: var(--ant-color-primary, #1677ff);
+  font-weight: 500;
+}
+.tags-tree-panel .tag-row.is-active:hover {
+  /* hover 在 active 上叠加更深一点，区分"已选 vs 已选悬停" */
+  background: var(--ant-color-primary-bg-hover, var(--ant-color-primary-bg, rgba(22, 119, 255, 0.16)));
+}
+.tags-tree-panel .tag-row.is-ctx-active {
+  outline-color: var(--ant-color-primary, #1677ff);
 }

@@ -7,7 +7,7 @@ import {
   Typography,
   Spin,
   Popconfirm,
-  Select,
+  TreeSelect,
   Tag as AntTag,
   Divider,
   Tooltip,
@@ -33,6 +33,7 @@ import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { relativeTime, stripHtml } from "@/lib/utils";
+import { buildTagTreeSelectData } from "@/lib/tagTree";
 import { TiptapEditor } from "@/components/editor";
 import { EditorOutline } from "@/components/editor/EditorOutline";
 import { EditorStats } from "@/components/editor/EditorStats";
@@ -451,10 +452,8 @@ function MetaBar({
   onChangeTagColor: (tagId: number, color: string | null) => Promise<void>;
 }) {
   const [tagSearch, setTagSearch] = useState("");
-  const tagOptions = allTags.map((t) => ({
-    label: t.name,
-    value: t.id,
-  }));
+  // 树形 treeData：复用左侧 TagsPanel 的同款 helper（value=数字 id，title=标签名）
+  const tagTreeData = useMemo(() => buildTagTreeSelectData(allTags), [allTags]);
 
   const selectedTagIds = noteTags.map((t) => t.id);
   const trimmedSearch = tagSearch.trim();
@@ -522,21 +521,37 @@ function MetaBar({
               </AntTag>
             </Popover>
           ))}
-          <Select
-            mode="multiple"
+          {/* TreeSelect 把扁平 Select 升级为层级选择：复用 TagsPanel 的同款 treeData，
+              用 multiple 模式（非 treeCheckable）保持 value=number[] 兼容上层 onTagsChange 签名。
+              wrapper div 上的 onKeyDown 兜底回车快速创建——TreeSelect 内部 input 没有
+              暴露 onInputKeyDown，靠事件冒泡到 wrapper 监听。 */}
+          <div
+            onKeyDown={async (e) => {
+              if (e.key === "Enter" && showCreate) {
+                e.preventDefault();
+                e.stopPropagation();
+                await onCreateTag(trimmedSearch);
+                setTagSearch("");
+              }
+            }}
+            style={{ minWidth: 160, maxWidth: 240 }}
+          >
+          <TreeSelect
+            multiple
             size="small"
             placeholder={
               allTags.length === 0
                 ? "输入标签名后回车创建"
                 : "+ 添加 / 搜索 / 新建"
             }
-            style={{ minWidth: 160, maxWidth: 240 }}
+            style={{ width: "100%" }}
             value={selectedTagIds}
-            onChange={onTagsChange}
-            options={tagOptions}
+            onChange={(val) => onTagsChange(val as number[])}
+            treeData={tagTreeData}
+            treeDefaultExpandAll
             maxTagCount={0}
             maxTagPlaceholder={`+ 添加`}
-            popupMatchSelectWidth={240}
+            popupMatchSelectWidth={260}
             notFoundContent={
               trimmedSearch
                 ? null
@@ -548,20 +563,7 @@ function MetaBar({
             // searchValue 受控，便于在创建标签后清空输入框
             searchValue={tagSearch}
             onSearch={setTagSearch}
-            filterOption={(input, option) =>
-              String(option?.label ?? "")
-                .toLowerCase()
-                .includes(input.toLowerCase())
-            }
-            onInputKeyDown={async (e) => {
-              // 回车直接创建（当输入不存在时）
-              if (e.key === "Enter" && showCreate) {
-                e.preventDefault();
-                e.stopPropagation();
-                await onCreateTag(trimmedSearch);
-                setTagSearch("");
-              }
-            }}
+            treeNodeFilterProp="title"
             popupRender={(menu) => (
               <>
                 {menu}
@@ -641,6 +643,7 @@ function MetaBar({
               </>
             )}
           />
+          </div>
         </div>
       </div>
 
@@ -1700,12 +1703,13 @@ function DesktopNoteEditorPage() {
     <div className="editor-page">
       {/* 顶部工具栏 */}
       <div className="editor-topbar">
-        <Space align="center">
+        {/* 左侧：返回按钮 + 右边小字（更新时间 / 保存状态 上下堆叠）
+            原方案是同一行 Space，"更新于 XX 分钟前 未保存"会把按钮挤到换行；
+            改成竖向堆叠后整个左侧组宽度变窄，按钮全部回到一行 */}
+        <div className="editor-topbar__left">
           <Button
             icon={<ArrowLeft size={16} />}
             onClick={() => {
-              // 有历史栈（从 /tasks、/search、/daily 等跳进来）就 back
-              // 否则回笔记列表作为默认目的地
               if (window.history.length > 1) {
                 navigate(-1);
               } else {
@@ -1715,31 +1719,30 @@ function DesktopNoteEditorPage() {
           >
             返回
           </Button>
-          {note && (
-            <Text type="secondary">
-              更新于 {relativeTime(note.updated_at)}
-            </Text>
+          {(note || autoSaving || dirty || (autoSaveEnabled && lastAutoSavedAt)) && (
+            <div className="editor-topbar__meta">
+              {note && (
+                <Text type="secondary" style={{ fontSize: 11, lineHeight: 1.2 }}>
+                  更新于 {relativeTime(note.updated_at)}
+                </Text>
+              )}
+              {/* 保存状态提示：优先级 自动保存中 > 未保存 > 已自动保存（沿用旧逻辑） */}
+              {autoSaving ? (
+                <Text type="secondary" style={{ fontSize: 11, lineHeight: 1.2 }}>
+                  自动保存中…
+                </Text>
+              ) : dirty ? (
+                <Text type="warning" style={{ fontSize: 11, lineHeight: 1.2 }}>
+                  未保存
+                </Text>
+              ) : autoSaveEnabled && lastAutoSavedAt ? (
+                <Text type="secondary" style={{ fontSize: 11, lineHeight: 1.2 }}>
+                  已自动保存 {relativeTime(new Date(lastAutoSavedAt).toISOString())}
+                </Text>
+              ) : null}
+            </div>
           )}
-          {/*
-            * 保存状态提示：优先级 自动保存中 > 未保存 > 已自动保存。
-            * - 自动保存关闭：只在 dirty 时显示"未保存"（沿用旧行为）。
-            * - 自动保存开启：dirty 时显示"未保存"等防抖触发；保存中显示"自动保存中..."；
-            *   保存完成显示"已自动保存 {相对时间}"，让用户知道软件刚帮他存过。
-            */}
-          {autoSaving ? (
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              自动保存中…
-            </Text>
-          ) : dirty ? (
-            <Text type="warning" style={{ fontSize: 12 }}>
-              未保存
-            </Text>
-          ) : autoSaveEnabled && lastAutoSavedAt ? (
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              已自动保存 {relativeTime(new Date(lastAutoSavedAt).toISOString())}
-            </Text>
-          ) : null}
-        </Space>
+        </div>
         <Space align="center">
           <Tooltip title={readingMode ? "切换到编辑模式" : "切换到阅读模式（隐藏工具栏，不可编辑）"}>
             <Button

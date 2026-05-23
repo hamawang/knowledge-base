@@ -26,6 +26,16 @@ pub fn set_tag_parent(
     TagService::set_parent(&state.db, id, parent_id).map_err(|e| e.to_string())
 }
 
+/// 批量重排同级标签：`ordered_ids` 是同一 parent（或全顶层）下的完整顺序列表。
+/// 间隔 1000 留给未来插队（参考 notes / folders 的同款实现）。
+#[tauri::command]
+pub fn reorder_tags(
+    state: tauri::State<'_, AppState>,
+    ordered_ids: Vec<i64>,
+) -> Result<(), String> {
+    TagService::reorder(&state.db, &ordered_ids).map_err(|e| e.to_string())
+}
+
 /// 获取所有标签
 #[tauri::command]
 pub fn list_tags(state: tauri::State<'_, AppState>) -> Result<Vec<Tag>, String> {

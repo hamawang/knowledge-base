@@ -3,7 +3,7 @@ use rusqlite::Connection;
 use crate::error::AppError;
 
 /// 当前 Schema 版本
-pub const SCHEMA_VERSION: i32 = 44;
+pub const SCHEMA_VERSION: i32 = 45;
 
 /// 获取数据库版本
 pub fn get_version(conn: &Connection) -> Result<i32, AppError> {
@@ -74,6 +74,7 @@ pub fn migrate(conn: &Connection) -> Result<(), AppError> {
             41 => migrate_v41_to_v42(conn)?,
             42 => migrate_v42_to_v43(conn)?,
             43 => migrate_v43_to_v44(conn)?,
+            44 => migrate_v44_to_v45(conn)?,
             _ => {
                 return Err(AppError::Custom(format!("未知的数据库版本: {}", version)));
             }
@@ -1827,5 +1828,47 @@ fn migrate_v43_to_v44(conn: &Connection) -> Result<(), AppError> {
     )?;
 
     set_version(conn, 44)?;
+    Ok(())
+}
+
+/// v44 -> v45: tags 加 sort_order（同级自定义排序）
+///
+/// 设计（对齐 v30→v31 notes.sort_order / folders.sort_order）：
+/// - INTEGER NOT NULL DEFAULT 0；越小越靠前；同 parent 内按 1000 间隔留空隙
+///   留给未来插队，避免每次拖动都全量重排
+/// - 初始化：按 COALESCE(parent_id, -1) 分组，组内按 name 字母序赋 0/1000/2000…
+///   (顶层标签 parent_id IS NULL 单独成一组 = -1)
+/// - 索引 idx_tags_parent_sort 覆盖 (parent_id, sort_order)，加速 list_tags 排序
+fn migrate_v44_to_v45(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v44 -> v45 (tags.sort_order 自定义排序)");
+
+    let cols = list_columns(conn, "tags")?;
+    if !cols.iter().any(|c| c == "sort_order") {
+        conn.execute_batch("ALTER TABLE tags ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;")?;
+    }
+
+    // 已有数据初始化：同一 parent 内按 name COLLATE NOCASE 升序分配 0/1000/2000...
+    conn.execute_batch(
+        "
+        WITH ranked AS (
+            SELECT id,
+                   (ROW_NUMBER() OVER (
+                        PARTITION BY COALESCE(parent_id, -1)
+                        ORDER BY name COLLATE NOCASE ASC, id ASC
+                   ) - 1) * 1000 AS new_order
+            FROM tags
+        )
+        UPDATE tags
+        SET sort_order = (SELECT new_order FROM ranked WHERE ranked.id = tags.id)
+        WHERE id IN (SELECT id FROM ranked);
+        ",
+    )?;
+
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_tags_parent_sort
+            ON tags(parent_id, sort_order);",
+    )?;
+
+    set_version(conn, 45)?;
     Ok(())
 }

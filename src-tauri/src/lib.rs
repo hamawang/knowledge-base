@@ -589,13 +589,17 @@ pub fn run() {
             #[cfg(desktop)]
             if let Some(window) = app.get_webview_window("main") {
                 // 启动尺寸智能化：按主显示器逻辑分辨率重设窗口大小。
-                // 规则：永不比 conf.json 默认 1330×830 更小（floor），按屏宽 70% 计算，
+                // 规则：永不比 conf.json 默认 1388×830 更小（floor），按屏宽 75% 计算，
                 //       同时不超出屏幕 95%、最高 1700×1050（cap）。
                 //
+                // 注意：floor 必须与 tauri.conf.json 的 width 保持一致 — 之前 floor=1330
+                // 而 conf.json=1388 时，1080p (logical 1920) 走 1920*0.7=1344 被 1330 floor 兜
+                // 但实际不到 1388 → 改 conf 不生效；现在统一抬到 1388（编辑器 toolbar 一行所需的最小宽度）。
+                //
                 // 验证：
-                // - 1080p 100%      (logical 1920×1080): 1344×832  ≈ 默认
-                // - 27" 2K 150% Win (logical 1707×960):  1330×830  = 默认（floor 兜底，避免变窄）
-                // - 27" 2K 125% Win (logical 2048×1152): 1434×887  适度放大
+                // - 1080p 100%      (logical 1920×1080): 1440×832  屏宽 75%（编辑器 toolbar 一行）
+                // - 27" 2K 150% Win (logical 1707×960):  1388×830  floor 兜底
+                // - 27" 2K 125% Win (logical 2048×1152): 1536×887  适度放大（屏宽 75%）
                 // - 27" 2K 100%     (logical 2560×1440): 1700×1050 上限
                 // - 旧本 1366×768  (logical 1366×768):  1297×729  屏幕 95%（屏幕本身比默认还小时退让）
                 //
@@ -605,8 +609,8 @@ pub fn run() {
                     let scale = monitor.scale_factor().max(0.1);
                     let logical_w = phys.width as f64 / scale;
                     let logical_h = phys.height as f64 / scale;
-                    let target_w = (logical_w * 0.70)
-                        .max(1330.0)
+                    let target_w = (logical_w * 0.75)
+                        .max(1388.0)
                         .min(logical_w * 0.95)
                         .min(1700.0);
                     let target_h = (logical_h * 0.77)
@@ -971,6 +975,7 @@ pub fn run() {
             commands::notes::toggle_pin,
             commands::notes::move_note_to_folder,
             commands::notes::reorder_notes,
+            commands::notes::list_note_ids_for_reorder,
             commands::notes::move_notes_batch,
             commands::notes::trash_notes_batch,
             commands::notes::add_tags_to_notes_batch,
@@ -1053,6 +1058,7 @@ pub fn run() {
             commands::tags::rename_tag,
             commands::tags::set_tag_color,
             commands::tags::set_tag_parent,
+            commands::tags::reorder_tags,
             commands::tags::delete_tag,
             commands::tags::add_tag_to_note,
             commands::tags::remove_tag_from_note,
