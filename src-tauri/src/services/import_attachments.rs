@@ -97,6 +97,91 @@ impl AttachmentIndex {
             total_indexed: total,
         }
     }
+
+    /// 单文件 `open_markdown_file` 场景的轻量索引
+    ///
+    /// 与 `build` 区别：没有 vault 概念，锚点是 .md 同级目录。
+    /// 扫描范围（仅图片扩展名）：
+    ///   1. note_dir **自身**：非递归（只扫直接子文件，避免误吸下层无关图片）
+    ///   2. note_dir 下的 OB 约定附件子目录（`attachments/` `assets/` `images/` `_resources/`）：递归
+    ///
+    /// 这样能识别两种常见 OB 单文件布局：
+    ///   - `xxx.md` + 同级图片散落：`note_dir/IMG.png`
+    ///   - `xxx.md` + 同级 `attachments/`：`note_dir/attachments/IMG.png`（用户实测场景）
+    ///
+    /// 同名先到先得（与 `build` 一致）；note_dir 自身的图片优先于子目录里的同名图片。
+    pub fn build_for_single_file(note_dir: &Path) -> Self {
+        let mut by_basename: HashMap<String, PathBuf> = HashMap::new();
+        let mut total = 0usize;
+
+        // pass 1：note_dir 自身（非递归）
+        if note_dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(note_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if !path.is_file() {
+                        continue;
+                    }
+                    let ext = path
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.to_ascii_lowercase())
+                        .unwrap_or_default();
+                    if !IMAGE_EXTS.contains(&ext.as_str()) {
+                        continue;
+                    }
+                    let key = match path.file_name().and_then(|s| s.to_str()) {
+                        Some(n) => n.to_ascii_lowercase(),
+                        None => continue,
+                    };
+                    total += 1;
+                    by_basename.entry(key).or_insert(path);
+                }
+            }
+        }
+
+        // pass 2：note_dir/<attach-dir>/**（递归，复用 build 的约定目录列表）
+        for dir_name in ATTACHMENT_DIR_NAMES {
+            let dir = note_dir.join(dir_name);
+            if !dir.is_dir() {
+                continue;
+            }
+            for entry in WalkDir::new(&dir).into_iter().filter_map(|e| e.ok()) {
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                let path = entry.path();
+                let ext = path
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_ascii_lowercase())
+                    .unwrap_or_default();
+                if !IMAGE_EXTS.contains(&ext.as_str()) {
+                    continue;
+                }
+                let key = match path.file_name().and_then(|s| s.to_str()) {
+                    Some(n) => n.to_ascii_lowercase(),
+                    None => continue,
+                };
+                total += 1;
+                if let Some(existing) = by_basename.get(&key) {
+                    log::warn!(
+                        "[import-single] 同名附件：'{}' 已索引 {}, 忽略 {}（先到先得）",
+                        key,
+                        existing.display(),
+                        path.display()
+                    );
+                    continue;
+                }
+                by_basename.insert(key, path.to_path_buf());
+            }
+        }
+
+        Self {
+            by_basename,
+            total_indexed: total,
+        }
+    }
 }
 
 /// 单篇笔记 body 重写结果
@@ -748,6 +833,73 @@ mod tests {
         assert_eq!(r.copied, 0);
         assert!(r.missing.is_empty());
         assert_eq!(r.new_body, body);
+    }
+
+    /// 构造一个"单文件"目录布局：note_dir/note.md + note_dir/IMG-flat.png
+    /// + note_dir/attachments/IMG-sub.png；返回 (note_dir, app_data)
+    fn make_single_file_layout() -> (PathBuf, PathBuf) {
+        let root = temp_root();
+        let note_dir = root.join("note_dir");
+        let app_data = root.join("app_data");
+        std::fs::create_dir_all(note_dir.join("attachments")).unwrap();
+        std::fs::create_dir_all(&app_data).unwrap();
+        let png: &[u8] = b"\x89PNG\r\n\x1a\n";
+        // 同级散落
+        std::fs::write(note_dir.join("IMG-flat.png"), png).unwrap();
+        // attachments 子目录
+        std::fs::write(note_dir.join("attachments/IMG-sub.png"), png).unwrap();
+        (note_dir, app_data)
+    }
+
+    #[test]
+    fn single_file_index_picks_up_sibling_and_attachments() {
+        let (note_dir, _) = make_single_file_layout();
+        let idx = AttachmentIndex::build_for_single_file(&note_dir);
+        assert_eq!(idx.total_indexed, 2, "应同时扫到 flat + attachments");
+        assert!(idx.by_basename.contains_key("img-flat.png"));
+        assert!(idx.by_basename.contains_key("img-sub.png"));
+    }
+
+    #[test]
+    fn single_file_wiki_embed_hits_attachments_subdir() {
+        let (note_dir, app_data) = make_single_file_layout();
+        let idx = AttachmentIndex::build_for_single_file(&note_dir);
+        // OB wiki 写法 + 图片在 attachments/ 子目录 → 走 basename 索引命中
+        let body = "正文 ![[IMG-sub.png]] 后文";
+        let r = rewrite_image_paths(body, 99, &note_dir, &note_dir, &idx, &app_data).unwrap();
+        assert_eq!(r.copied, 1, "应命中并复制：{}", r.new_body);
+        assert!(r.missing.is_empty(), "missing 应空：{:?}", r.missing);
+        assert!(
+            r.new_body.contains("asset.localhost") || r.new_body.contains("asset://localhost"),
+            "应改写为 asset URL：{}",
+            r.new_body
+        );
+    }
+
+    #[test]
+    fn single_file_wiki_embed_hits_sibling_image() {
+        let (note_dir, app_data) = make_single_file_layout();
+        let idx = AttachmentIndex::build_for_single_file(&note_dir);
+        // OB wiki 写法 + 图片就在 .md 同级 → 走 basename 索引也命中
+        let body = "![[IMG-flat.png]]";
+        let r = rewrite_image_paths(body, 99, &note_dir, &note_dir, &idx, &app_data).unwrap();
+        assert_eq!(r.copied, 1, "同级图片应命中：{}", r.new_body);
+        assert!(r.missing.is_empty());
+    }
+
+    #[test]
+    fn single_file_index_non_recursive_for_note_dir() {
+        // 验证 note_dir 自身只扫直接子文件，不递归（递归仅限附件子目录）
+        let root = temp_root();
+        let note_dir = root.join("nd");
+        // 在 note_dir 下又建一个非约定子目录 sub_misc/，放图片
+        std::fs::create_dir_all(note_dir.join("sub_misc")).unwrap();
+        let png: &[u8] = b"\x89PNG\r\n\x1a\n";
+        std::fs::write(note_dir.join("sub_misc/should_not_be_indexed.png"), png).unwrap();
+        std::fs::write(note_dir.join("ok.png"), png).unwrap();
+        let idx = AttachmentIndex::build_for_single_file(&note_dir);
+        assert!(idx.by_basename.contains_key("ok.png"));
+        assert!(!idx.by_basename.contains_key("should_not_be_indexed.png"));
     }
 
     #[test]

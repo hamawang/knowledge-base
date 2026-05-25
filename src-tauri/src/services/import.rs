@@ -170,12 +170,17 @@ impl ImportService {
         let mut note_ids: Vec<i64> = Vec::new();
         let mut existing_note_ids: Vec<i64> = Vec::new();
 
-        // 提供了 root_path 时，在那里建附件索引（OB vault 模式）；
-        // 没传则不索引（用户只是导入零散 .md 文件，没 vault 上下文）
+        // 提供了 root_path 时，在那里建附件索引（OB vault 模式，全库共享一份）；
+        // 没传则按"每个 .md 同级目录"现场建索引（覆盖用户选零散文件、但每个文件
+        // 旁边有 attachments/ 子目录或同级散图的 OB 单文件场景）。
         let attachment_index = match root_path {
             Some(rp) => crate::services::import_attachments::AttachmentIndex::build(Path::new(rp)),
             None => crate::services::import_attachments::AttachmentIndex::empty(),
         };
+        // 零散文件场景下的 per-dir 索引缓存：parent_dir → 该目录下扫到的图片索引。
+        // 多个文件来自同一目录时复用，避免重复 walkdir。
+        let mut per_dir_index_cache: HashMap<PathBuf, crate::services::import_attachments::AttachmentIndex> =
+            HashMap::new();
 
         // 预先算好根扫描路径（用于对每个文件算相对目录）+ 预先建"保留根"文件夹
         let root_canonical: Option<PathBuf> = root_path
@@ -374,13 +379,35 @@ impl ImportService {
                         .as_ref()
                         .map(|p| p.as_path())
                         .unwrap_or_else(|| note_dir_for_local.as_path());
+                    // 索引选择：
+                    // - vault 模式：全库共享的 `attachment_index`（root_path 提供时已建）
+                    // - 零散文件模式：按 .md 同级目录按需建（命中缓存就复用）
+                    //
+                    // 这样 OB 用户从"导入 Markdown / TXT"选单个 .md 文件时，
+                    // 同级 `attachments/` 子目录里的图片也能被 wiki 嵌入命中。
+                    let per_file_index = if root_canonical.is_none() {
+                        Some(
+                            per_dir_index_cache
+                                .entry(note_dir_for_local.clone())
+                                .or_insert_with(|| {
+                                    crate::services::import_attachments::AttachmentIndex::build_for_single_file(
+                                        &note_dir_for_local,
+                                    )
+                                }),
+                        )
+                    } else {
+                        None
+                    };
+                    let index_ref = per_file_index
+                        .as_deref()
+                        .unwrap_or(&attachment_index);
                     let mut current_body = input.content.clone();
                     match crate::services::import_attachments::rewrite_image_paths(
                         &current_body,
                         note.id,
                         &note_dir_for_local,
                         local_root,
-                        &attachment_index,
+                        index_ref,
                         app_data_dir,
                     ) {
                         Ok(rewrite) => {
@@ -556,6 +583,24 @@ impl ImportService {
                     canonical,
                     existing_id
                 );
+            } else {
+                // 外部文件没变 + DB body 也跟磁盘一致；但 DB body 可能含历史
+                // 未解析的图片引用（旧版本附件索引为空时遗留的 ![[IMG.png]] 死链）。
+                // 用当前索引规则补跑一次：rewrite 对已是 asset URL 的引用是幂等的，
+                // 没命中也是无副作用；只有真有"现在能命中但当时没命中"的情况才会改 body。
+                // 不重置 mtime（外部 .md 确实没变）。
+                let (processed, mappings) =
+                    process_single_md_images(&existing_content, existing_id, path, app_data_dir)
+                        .await;
+                if processed != existing_content {
+                    let _ = db.update_note_content(existing_id, &processed);
+                    let _ = db.clear_url_mappings(existing_id);
+                    let _ = db.insert_url_mappings(existing_id, &mappings);
+                    log::info!(
+                        "[open-md] 笔记 #{} 用当前索引规则补处理了历史未解析图片引用",
+                        existing_id
+                    );
+                }
             }
             return Ok(OpenMarkdownResult {
                 note_id: existing_id,
@@ -629,9 +674,14 @@ async fn process_single_md_images(
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| md_path.to_path_buf());
 
-    // 单文件场景没有 vault 根；用 .md 同级目录兼当 vault 根，
-    // OB 附件索引为空（`AttachmentIndex::empty()`），仅靠相对路径解析
-    let empty_index = crate::services::import_attachments::AttachmentIndex::empty();
+    // 单文件场景没有 vault 根；用 .md 同级目录兼当 vault 根。
+    //
+    // 附件索引走 `build_for_single_file`（轻量）：扫 note_dir 自身（非递归）
+    // + note_dir 下 attachments/assets/images/_resources 子目录（递归）。
+    // 这样 OB 单文件场景里的 `![[IMG-xxx.png]]` 写法（按 basename 全局查）也能命中，
+    // 不再只能靠相对路径解析。
+    let single_file_index =
+        crate::services::import_attachments::AttachmentIndex::build_for_single_file(&note_dir);
     let mut current = body.to_string();
     let mut all_mappings: Vec<(String, String)> = Vec::new();
     if let Ok(rewrite) = crate::services::import_attachments::rewrite_image_paths(
@@ -639,7 +689,7 @@ async fn process_single_md_images(
         note_id,
         &note_dir,
         &note_dir,
-        &empty_index,
+        &single_file_index,
         app_data_dir,
     ) {
         current = rewrite.new_body;
