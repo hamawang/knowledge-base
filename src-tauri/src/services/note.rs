@@ -1,11 +1,48 @@
 use crate::database::Database;
 use crate::error::AppError;
-use crate::models::{Note, NoteInput, NoteQuery, PageResult};
+use crate::models::{Note, NoteImageRef, NoteInput, NoteQuery, PageResult};
+use crate::services::sync_v1::attachment_scan::extract_local_refs;
+
+/// 单篇笔记最多回传的图片数，防一篇图墙笔记撑爆 IPC 载荷 / 刷屏 AI 回答下方。
+const MAX_IMAGES_PER_NOTE: usize = 12;
 
 /// 笔记服务
 pub struct NoteService;
 
 impl NoteService {
+    /// 抽取一批笔记 content 里的图片资源，给 AI 回答下方"溯源"挂缩略图用。
+    ///
+    /// 入参一般来自 AI message 的 references（引用了哪几篇笔记）。逐篇取 content，
+    /// 复用 `extract_local_refs` 抽出所有本地资产相对路径，再按 `kb_assets/images/`
+    /// 路径段过滤——只留图片，自然排除视频(`videos/`)、PDF(`pdfs/`)、附件(`attachments/`)。
+    /// 加密笔记 content 是占位符，抽不到图；查不到的 note_id 静默跳过（可能已删）。
+    pub fn images_for_notes(
+        db: &Database,
+        note_ids: &[i64],
+    ) -> Result<Vec<NoteImageRef>, AppError> {
+        let mut out = Vec::new();
+        for &id in note_ids {
+            let note = match db.get_note(id) {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+            let images: Vec<String> = extract_local_refs(&note.content)
+                .into_iter()
+                // dev 前缀目录 `dev-kb_assets/images/` 同样含该子串，prod/dev 都覆盖
+                .filter(|rel| rel.contains("kb_assets/images/"))
+                .take(MAX_IMAGES_PER_NOTE)
+                .collect();
+            if !images.is_empty() {
+                out.push(NoteImageRef {
+                    note_id: id,
+                    title: note.title,
+                    images,
+                });
+            }
+        }
+        Ok(out)
+    }
+
     /// 创建笔记
     pub fn create(db: &Database, input: &NoteInput) -> Result<Note, AppError> {
         if input.title.trim().is_empty() {

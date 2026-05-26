@@ -971,6 +971,7 @@ pub fn run() {
             commands::notes::update_note,
             commands::notes::delete_note,
             commands::notes::get_note,
+            commands::notes::get_notes_images,
             commands::notes::list_notes,
             commands::notes::toggle_pin,
             commands::notes::move_note_to_folder,

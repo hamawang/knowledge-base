@@ -69,6 +69,19 @@ pub struct Note {
     pub sort_order: i64,
 }
 
+/// AI 引用笔记里抽出的图片清单（给前端在回答下方"溯源"挂缩略图）。
+///
+/// RAG 问答时 AI 引用了哪几篇笔记已记录在 message.references 里；前端拿这批 note_id
+/// 调 `get_notes_images` 取回每篇笔记 content 内的图片资源，渲染成可点击缩略图。
+/// `images` 是相对 data_dir 的 POSIX 路径（与 image.rs 落盘格式一致），
+/// 前端 `toKbAsset` 拼成 `kb-asset://` 后走 `resolveAssetSrc`/`getBlob`（加密图 .enc）渲染。
+#[derive(Debug, Clone, Serialize)]
+pub struct NoteImageRef {
+    pub note_id: i64,
+    pub title: String,
+    pub images: Vec<String>,
+}
+
 // ─── T-007 笔记加密保险库 ──────────────────────
 
 /// Vault 整体状态

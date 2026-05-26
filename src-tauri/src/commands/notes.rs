@@ -1,4 +1,4 @@
-use crate::models::{Note, NoteInput, NoteQuery, PageResult};
+use crate::models::{Note, NoteImageRef, NoteInput, NoteQuery, PageResult};
 use crate::services::note::NoteService;
 #[cfg(desktop)]
 use crate::services::popout_window;
@@ -47,6 +47,17 @@ pub fn delete_note(state: tauri::State<'_, AppState>, id: i64) -> Result<(), Str
 #[tauri::command]
 pub fn get_note(state: tauri::State<'_, AppState>, id: i64) -> Result<Note, String> {
     NoteService::get(&state.db, id).map_err(|e| e.to_string())
+}
+
+/// 取一批笔记里的图片资源（AI 回答下方"溯源"挂缩略图用）。
+///
+/// 入参一般是 AI message references 里的笔记 id。只回带图的笔记；空结果合法。
+#[tauri::command]
+pub fn get_notes_images(
+    state: tauri::State<'_, AppState>,
+    note_ids: Vec<i64>,
+) -> Result<Vec<NoteImageRef>, String> {
+    NoteService::images_for_notes(&state.db, &note_ids).map_err(|e| e.to_string())
 }
 
 /// 切换笔记置顶状态
