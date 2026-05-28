@@ -27,8 +27,8 @@ const AI_MODEL_COLS: &str =
 
 /// 把一行 ai_conversations 查询结果转成 AiConversation
 ///
-/// 列顺序约定（v25 起 6 列）：
-///   id, title, model_id, attached_note_ids, created_at, updated_at
+/// 列顺序约定（v46 起 7 列）：
+///   id, title, model_id, attached_note_ids, scope_folder_id, created_at, updated_at
 fn row_to_ai_conversation(row: &rusqlite::Row) -> rusqlite::Result<AiConversation> {
     let attached_json: String = row.get(3)?;
     // 反序列化失败回退空数组（防御性：旧数据 / 手动改坏的情况下不让查询炸）
@@ -38,12 +38,14 @@ fn row_to_ai_conversation(row: &rusqlite::Row) -> rusqlite::Result<AiConversatio
         title: row.get(1)?,
         model_id: row.get(2)?,
         attached_note_ids,
-        created_at: row.get(4)?,
-        updated_at: row.get(5)?,
+        scope_folder_id: row.get(4)?,
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
     })
 }
 
-const AI_CONV_COLS: &str = "id, title, model_id, attached_note_ids, created_at, updated_at";
+const AI_CONV_COLS: &str =
+    "id, title, model_id, attached_note_ids, scope_folder_id, created_at, updated_at";
 
 #[cfg(test)]
 mod tests {
@@ -379,14 +381,15 @@ impl Database {
         &self,
         title: &str,
         model_id: i64,
+        scope_folder_id: Option<i64>,
     ) -> Result<AiConversation, AppError> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| AppError::Custom(e.to_string()))?;
         conn.execute(
-            "INSERT INTO ai_conversations (title, model_id) VALUES (?1, ?2)",
-            rusqlite::params![title, model_id],
+            "INSERT INTO ai_conversations (title, model_id, scope_folder_id) VALUES (?1, ?2, ?3)",
+            rusqlite::params![title, model_id, scope_folder_id],
         )?;
         let id = conn.last_insert_rowid();
         let sql = format!(
@@ -418,6 +421,34 @@ impl Database {
                      updated_at = datetime('now', 'localtime')
              WHERE id = ?2",
             rusqlite::params![json, conversation_id],
+        )?;
+        if affected == 0 {
+            return Err(AppError::NotFound(format!(
+                "对话 {} 不存在",
+                conversation_id
+            )));
+        }
+        Ok(())
+    }
+
+    /// 设置对话的 RAG 文件夹范围（"对此文件夹问 AI"在对话里随时改）。
+    ///
+    /// scope_folder_id = None 表示清除范围（恢复全库检索）。
+    pub fn set_conversation_scope_folder(
+        &self,
+        conversation_id: i64,
+        scope_folder_id: Option<i64>,
+    ) -> Result<(), AppError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| AppError::Custom(e.to_string()))?;
+        let affected = conn.execute(
+            "UPDATE ai_conversations
+                 SET scope_folder_id = ?1,
+                     updated_at = datetime('now', 'localtime')
+             WHERE id = ?2",
+            rusqlite::params![scope_folder_id, conversation_id],
         )?;
         if affected == 0 {
             return Err(AppError::NotFound(format!(
@@ -784,6 +815,7 @@ impl Database {
         &self,
         query: &str,
         limit: usize,
+        folder_ids: Option<&[i64]>,
     ) -> Result<Vec<(i64, String, String)>, AppError> {
         let conn = self
             .conn
@@ -791,6 +823,21 @@ impl Database {
             .map_err(|e| AppError::Custom(e.to_string()))?;
 
         let keywords = Self::extract_keywords(query);
+
+        // 文件夹范围限定（"对此文件夹问 AI"）：folder_ids 已是该文件夹 + 所有子孙文件夹的 id。
+        // i64 直接内联进 SQL（整数无注入风险），免去与 LIKE 占位符的编号冲突。
+        // None / 空 → 不加约束（全库检索，旧行为）。
+        let folder_clause = match folder_ids {
+            Some(ids) if !ids.is_empty() => {
+                let list = ids
+                    .iter()
+                    .map(|id| id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!(" AND n.folder_id IN ({})", list)
+            }
+            _ => String::new(),
+        };
 
         // 收集 LIKE 检索用的模式（%xx%）
         let like_keywords: Vec<String> = if keywords.is_empty() {
@@ -847,11 +894,12 @@ impl Database {
             let sql = format!(
                 "SELECT n.id, n.title, n.content, ({score}) AS score
                  FROM notes n
-                 WHERE n.is_deleted = 0 AND n.is_hidden = 0 AND ({where_})
+                 WHERE n.is_deleted = 0 AND n.is_hidden = 0 AND ({where_}){folder_clause}
                  ORDER BY score DESC, n.updated_at DESC
                  LIMIT ?{limit_param}",
                 score = score_sum,
                 where_ = where_clauses.join(" OR "),
+                folder_clause = folder_clause,
                 limit_param = like_keywords.len() + 1,
             );
 
@@ -890,15 +938,17 @@ impl Database {
                 .map(|k| Self::escape_fts5(k))
                 .collect::<Vec<_>>()
                 .join(" OR ");
-            if let Ok(mut stmt) = conn.prepare(
+            let fts_sql = format!(
                 "SELECT n.id, n.title, n.content
                  FROM notes_fts fts
                  JOIN notes n ON n.id = fts.rowid
                  WHERE notes_fts MATCH ?1
-                   AND n.is_deleted = 0
+                   AND n.is_deleted = 0{folder_clause}
                  ORDER BY rank
                  LIMIT ?2",
-            ) {
+                folder_clause = folder_clause,
+            );
+            if let Ok(mut stmt) = conn.prepare(&fts_sql) {
                 let rows = stmt
                     .query_map(rusqlite::params![fts_query, limit as i64], |row| {
                         Ok((

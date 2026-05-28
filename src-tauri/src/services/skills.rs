@@ -440,7 +440,8 @@ fn run_search_notes(db: &Database, args: &str) -> Result<String, AppError> {
     let a: SearchNotesArgs = serde_json::from_str(args)
         .map_err(|e| AppError::Custom(format!("search_notes 参数非法: {}", e)))?;
     let limit = a.limit.unwrap_or(5).clamp(1, 20) as usize;
-    let notes = db.search_notes_for_rag(&a.query, limit)?;
+    // 智能模式工具调用暂不接文件夹范围限定（无会话上下文）；范围问答走 RAG 路径 chat_stream。
+    let notes = db.search_notes_for_rag(&a.query, limit, None)?;
     if notes.is_empty() {
         return Ok("未找到相关笔记".to_string());
     }

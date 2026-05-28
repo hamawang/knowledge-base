@@ -432,8 +432,8 @@ export const aiModelApi = {
 export const aiChatApi = {
   listConversations: () =>
     invoke<AiConversation[]>("list_ai_conversations"),
-  createConversation: (title?: string, modelId?: number) =>
-    invoke<AiConversation>("create_ai_conversation", { title, modelId }),
+  createConversation: (title?: string, modelId?: number, scopeFolderId?: number) =>
+    invoke<AiConversation>("create_ai_conversation", { title, modelId, scopeFolderId }),
   deleteConversation: (id: number) =>
     invoke<void>("delete_ai_conversation", { id }),
   /** 批量清理：olderThanDays 不传 = 全清；传 N = 删除 N 天前未活动的对话；返回删除条数 */
@@ -477,6 +477,12 @@ export const aiChatApi = {
     invoke<void>("set_ai_conversation_attached_notes", {
       conversationId,
       noteIds,
+    }),
+  /** 设置/清除对话的 RAG 文件夹范围；scopeFolderId 传 null 清除（恢复全库） */
+  setScopeFolder: (conversationId: number, scopeFolderId: number | null) =>
+    invoke<void>("set_ai_conversation_scope_folder", {
+      conversationId,
+      scopeFolderId,
     }),
   /**
    * B 方向：把整个对话归档成笔记。title 为空时取对话当前标题；

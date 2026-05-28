@@ -3,7 +3,7 @@ use rusqlite::Connection;
 use crate::error::AppError;
 
 /// 当前 Schema 版本
-pub const SCHEMA_VERSION: i32 = 45;
+pub const SCHEMA_VERSION: i32 = 46;
 
 /// 获取数据库版本
 pub fn get_version(conn: &Connection) -> Result<i32, AppError> {
@@ -75,6 +75,7 @@ pub fn migrate(conn: &Connection) -> Result<(), AppError> {
             42 => migrate_v42_to_v43(conn)?,
             43 => migrate_v43_to_v44(conn)?,
             44 => migrate_v44_to_v45(conn)?,
+            45 => migrate_v45_to_v46(conn)?,
             _ => {
                 return Err(AppError::Custom(format!("未知的数据库版本: {}", version)));
             }
@@ -1870,5 +1871,22 @@ fn migrate_v44_to_v45(conn: &Connection) -> Result<(), AppError> {
     )?;
 
     set_version(conn, 45)?;
+    Ok(())
+}
+
+fn migrate_v45_to_v46(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v45 -> v46 (ai_conversations.scope_folder_id 文件夹范围问答)");
+
+    // scope_folder_id：对话级 RAG 范围限定。
+    // NULL = 全库检索（默认旧行为）；有值 = RAG 只在该文件夹及其所有子孙文件夹内检索。
+    // 存文件夹 id 而非展开后的 id 列表：文件夹结构/笔记归属变化后范围能自动跟上。
+    let cols = list_columns(conn, "ai_conversations")?;
+    if !cols.iter().any(|c| c == "scope_folder_id") {
+        conn.execute_batch(
+            "ALTER TABLE ai_conversations ADD COLUMN scope_folder_id INTEGER;",
+        )?;
+    }
+
+    set_version(conn, 46)?;
     Ok(())
 }

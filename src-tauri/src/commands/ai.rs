@@ -74,6 +74,7 @@ pub fn create_ai_conversation(
     state: State<'_, AppState>,
     title: Option<String>,
     model_id: Option<i64>,
+    scope_folder_id: Option<i64>,
 ) -> Result<AiConversation, String> {
     let title = title.unwrap_or_else(|| "新对话".to_string());
     let model_id = match model_id {
@@ -88,7 +89,7 @@ pub fn create_ai_conversation(
     };
     state
         .db
-        .create_ai_conversation(&title, model_id)
+        .create_ai_conversation(&title, model_id, scope_folder_id)
         .map_err(|e| e.to_string())
 }
 
@@ -152,6 +153,20 @@ pub fn set_ai_conversation_attached_notes(
     state
         .db
         .set_conversation_attached_notes(conversation_id, &note_ids)
+        .map_err(|e| e.to_string())
+}
+
+/// 设置对话的 RAG 文件夹范围（AI 页"附加文件夹"按钮）。
+/// scope_folder_id = None 清除范围，恢复全库检索。
+#[tauri::command]
+pub fn set_ai_conversation_scope_folder(
+    state: State<'_, AppState>,
+    conversation_id: i64,
+    scope_folder_id: Option<i64>,
+) -> Result<(), String> {
+    state
+        .db
+        .set_conversation_scope_folder(conversation_id, scope_folder_id)
         .map_err(|e| e.to_string())
 }
 
@@ -454,7 +469,7 @@ pub fn get_or_create_companion_conversation(
     };
     let default_model = db.get_default_ai_model().map_err(|e| e.to_string())?;
     let conv = db
-        .create_ai_conversation(&title, default_model.id)
+        .create_ai_conversation(&title, default_model.id, None)
         .map_err(|e| e.to_string())?;
     // 自动把本笔记挂上去作为附加上下文
     db.set_conversation_attached_notes(conv.id, &[note_id])

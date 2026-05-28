@@ -11,6 +11,7 @@ import {
   Switch,
   Tooltip,
   Dropdown,
+  TreeSelect,
   theme as antdTheme,
 } from "antd";
 import type { MenuProps } from "antd";
@@ -34,18 +35,20 @@ import {
   X,
   Copy,
   Quote,
+  FolderOpen,
 } from "lucide-react";
 import { CloseCircleFilled } from "@ant-design/icons";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useNavigate, useLocation } from "react-router-dom";
-import { aiChatApi, aiModelApi, noteApi, aiAttachmentApi } from "@/lib/api";
+import { aiChatApi, aiModelApi, noteApi, aiAttachmentApi, folderApi } from "@/lib/api";
 import { useAppStore } from "@/store";
 import type {
   AiConversation,
   AiMessage,
   AiModel,
   AttachmentPreview,
+  Folder,
   MessageAttachment,
   Note,
   SkillCall,
@@ -181,6 +184,10 @@ function DesktopAiChatPage() {
   // 附加笔记（A 方向）：当前对话的 attached_note_ids 对应的完整笔记对象
   const [attachedNotes, setAttachedNotes] = useState<Note[]>([]);
   const [attachOpen, setAttachOpen] = useState(false);
+  // 文件夹范围（scope_folder_id）：AI 页"附加文件夹"按钮 → 选文件夹 → 限定 RAG 检索范围
+  const [scopeModalOpen, setScopeModalOpen] = useState(false);
+  const [folders, setFolders] = useState<Folder[]>([]);
+  const [scopePick, setScopePick] = useState<number | undefined>(undefined);
   // 归档（B 方向）：把对话存为笔记的 Modal
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [archiveTitle, setArchiveTitle] = useState("");
@@ -467,6 +474,39 @@ function DesktopAiChatPage() {
       );
     } catch (e) {
       message.error(`保存失败: ${e}`);
+    }
+  }
+
+  /** 打开"附加文件夹"Modal：加载文件夹树 + 回填当前范围 */
+  function openScopeModal() {
+    if (!activeConvId) return;
+    const conv = conversations.find((c) => c.id === activeConvId);
+    setScopePick(conv?.scope_folder_id ?? undefined);
+    folderApi.list().then(setFolders).catch(() => setFolders([]));
+    setScopeModalOpen(true);
+  }
+
+  /** 确认设置文件夹范围（RAG 检索限定到该文件夹及子孙）；scopePick 为空则清除范围 */
+  async function handleConfirmScope() {
+    if (!activeConvId) return;
+    try {
+      await aiChatApi.setScopeFolder(activeConvId, scopePick ?? null);
+      await loadConversations();
+      setScopeModalOpen(false);
+      message.success(scopePick == null ? "已清除文件夹范围" : "已限定文件夹范围");
+    } catch (e) {
+      message.error(`设置范围失败: ${e}`);
+    }
+  }
+
+  /** 范围 chip 上的 × ：清除文件夹范围，恢复全库检索 */
+  async function handleClearScope() {
+    if (!activeConvId) return;
+    try {
+      await aiChatApi.setScopeFolder(activeConvId, null);
+      await loadConversations();
+    } catch (e) {
+      message.error(`清除范围失败: ${e}`);
     }
   }
 
@@ -1147,6 +1187,25 @@ function DesktopAiChatPage() {
                 background: token.colorBgContainer,
               }}
             >
+              {/* 文件夹范围标识：scope_folder_id 不为空时提示本会话已限定检索范围
+                  （由侧边栏「对此文件夹问 AI」发起；会话标题里的 📁 文件夹名进一步指明是哪个）*/}
+              {conversations.find((c) => c.id === activeConvId)?.scope_folder_id != null && (
+                <div className="flex items-center gap-1.5 mb-2">
+                  <span
+                    className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full"
+                    style={{ background: token.colorInfoBg, color: token.colorInfo }}
+                    title="本会话只在该文件夹及其子文件夹的笔记里检索作答"
+                  >
+                    🔍 已限定在此文件夹（含子文件夹）范围内检索
+                    <X
+                      size={11}
+                      style={{ cursor: "pointer", flexShrink: 0 }}
+                      onClick={handleClearScope}
+                    />
+                  </span>
+                </div>
+              )}
+
               {/* 附加笔记 chip 区：仅在挂载了笔记时显示 */}
               {attachedNotes.length > 0 && (
                 <div
@@ -1212,6 +1271,13 @@ function DesktopAiChatPage() {
                     icon={<BookOpen size={16} />}
                     onClick={() => setAttachOpen(true)}
                     disabled={streaming}
+                  />
+                </Tooltip>
+                <Tooltip title="附加文件夹：限定本对话只在某文件夹（含子文件夹）范围内检索作答">
+                  <Button
+                    icon={<FolderOpen size={16} />}
+                    onClick={openScopeModal}
+                    disabled={streaming || !activeConvId}
                   />
                 </Tooltip>
                 <Tooltip title="附加文件作为本次提问的上下文（支持 Excel / PDF / Markdown / TXT 等，可多选）">
@@ -1303,6 +1369,33 @@ function DesktopAiChatPage() {
         onClose={() => setAttachOpen(false)}
         onConfirm={handleAttachConfirm}
       />
+
+      {/* 附加文件夹：选一个文件夹限定本对话的 RAG 检索范围（含子文件夹） */}
+      <Modal
+        title="附加文件夹（限定检索范围）"
+        open={scopeModalOpen}
+        onOk={handleConfirmScope}
+        onCancel={() => setScopeModalOpen(false)}
+        okText="确定"
+        cancelText="取消"
+        destroyOnClose
+      >
+        <p className="text-xs mb-2" style={{ color: token.colorTextSecondary }}>
+          选定后，本对话的 AI 只在该文件夹及其所有子文件夹的笔记里检索作答；留空 = 全库检索。
+        </p>
+        <TreeSelect
+          style={{ width: "100%" }}
+          value={scopePick}
+          onChange={(v) => setScopePick(v as number | undefined)}
+          treeData={folders as unknown as Record<string, unknown>[]}
+          fieldNames={{ label: "name", value: "id", children: "children" }}
+          placeholder="选择文件夹（不选 = 全库）"
+          allowClear
+          treeDefaultExpandAll
+          showSearch
+          treeNodeFilterProp="name"
+        />
+      </Modal>
 
       {/* B 方向：归档对话 Modal */}
       <Modal

@@ -1102,6 +1102,7 @@ pub fn run() {
             commands::ai::undo_task_batch,
             commands::ai::ai_draft_note,
             commands::ai::set_ai_conversation_attached_notes,
+            commands::ai::set_ai_conversation_scope_folder,
             commands::ai::archive_ai_conversation_to_note,
             commands::ai::get_or_create_companion_conversation,
             // 提示词库模块

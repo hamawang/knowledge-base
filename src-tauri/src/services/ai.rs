@@ -964,7 +964,14 @@ impl AiService {
         let mut rag_context = String::new();
         let mut ref_ids: Vec<i64> = Vec::new();
         if use_rag {
-            let notes = db.search_notes_for_rag(user_message, RAG_TOP_N)?;
+            // 文件夹范围会话（"对此文件夹问 AI"）：把 scope_folder_id 实时展开成
+            // 该文件夹 + 所有子孙文件夹的 id，RAG 只在这些文件夹内检索。None = 全库。
+            let scope_ids = match conv.scope_folder_id {
+                Some(fid) => db.collect_descendant_folder_ids(fid).ok(),
+                None => None,
+            };
+            let notes =
+                db.search_notes_for_rag(user_message, RAG_TOP_N, scope_ids.as_deref())?;
             if !notes.is_empty() {
                 let total_budget =
                     ((model.max_context as f64) * RAG_BUDGET_RATIO * CHARS_PER_TOKEN_CJK)

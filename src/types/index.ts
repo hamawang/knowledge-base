@@ -253,6 +253,8 @@ export interface AiConversation {
   model_id: number;
   /** 附加给本对话的笔记 ID 列表，整个对话共享 */
   attached_note_ids: number[];
+  /** RAG 检索范围限定到某文件夹（含子孙）；null = 全库。「对此文件夹问 AI」发起时带上 */
+  scope_folder_id: number | null;
   created_at: string;
   updated_at: string;
 }
