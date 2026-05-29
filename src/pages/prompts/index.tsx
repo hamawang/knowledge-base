@@ -360,7 +360,7 @@ export default function PromptsPage() {
 
   return (
     <div
-      className="p-6 max-w-5xl mx-auto"
+      className="max-w-5xl mx-auto"
       onContextMenu={(e) => {
         // 顶层兜底：表格行有自己的 onContextMenu 会先 preventDefault；
         // 其他位置吞 WebView 默认菜单。input/textarea 白名单留给表单输入

@@ -189,6 +189,7 @@ import { SUPPORTED_PROVIDERS } from "./embedVideoProviders";
 import { attachmentApi, imageApi, systemApi, videoApi } from "@/lib/api";
 import { parseKbAsset, resolveAssetSrc, toKbAsset, KB_ASSET_SCHEME } from "@/lib/assetUrl";
 import { useAppStore } from "@/store";
+import { keyboardEventToAccel } from "@/lib/shortcuts/registry";
 import {
   useAttachmentPreviewStore,
   isPreviewableAttachment,
@@ -696,6 +697,10 @@ export function TiptapEditor({
   // SlashCommand 媒体项需要函数式取最新 noteId 才能在切笔记后正确插入。
   const noteIdRef = useRef(noteId);
   noteIdRef.current = noteId;
+  // 阅读态同样用 ref：WikiLinkDecoration 在编辑器实例创建时一次性配置，
+  // 靠函数式取值才能让"阅读态单击即跳转"的判断拿到实时 readingMode。
+  const readingModeRef = useRef(readingMode);
+  readingModeRef.current = readingMode;
 
   // 斜杠菜单"嵌入网络视频"项需要在 React 树里弹 URL 输入框。
   // 用一个 pending resolver 桥接异步流程：
@@ -1238,7 +1243,14 @@ export function TiptapEditor({
         excludes: "",
       }),
       Placeholder.configure({ placeholder }),
-      Highlight.configure({ multicolor: true }),
+      // 高亮：禁用 Tiptap 内置的 Mod-Shift-h，键位改由下方 editorProps.handleKeyDown 读
+      // store.editorHighlightShortcut 实时触发，实现"高亮快捷键可自定义"。
+      // 若保留内置键位，用户没改键时会和 handleKeyDown 双触发 → toggleHighlight 跑两次互相抵消。
+      Highlight.extend({
+        addKeyboardShortcuts() {
+          return {};
+        },
+      }).configure({ multicolor: true }),
       // 批注：选中文字加补充说明，data-comment 直接存在 mark 里，跟着笔记走
       Annotation,
       TaskList,
@@ -1323,6 +1335,7 @@ export function TiptapEditor({
       Column,
       WikiLinkDecoration.configure({
         onClick: (title: string, id?: number) => wikiClickRef.current?.(title, id),
+        isReadingMode: () => readingModeRef.current,
       }),
       WikiLinkSuggestion,
       SlashCommand.configure({
@@ -1397,6 +1410,19 @@ export function TiptapEditor({
       flushNow();
     },
     editorProps: {
+      // 自定义「高亮」快捷键：从 store 实时读 accelerator（用户可在设置页改键 / 禁用），
+      // 命中即 toggleHighlight。Tiptap Highlight 内置 Mod-Shift-h 已在扩展层禁用，避免双触发。
+      // getState() 取实时值，无需把 store 值塞进 useEditor 依赖（编辑器只创建一次）。
+      handleKeyDown: (_view, event) => {
+        const accel = useAppStore.getState().editorHighlightShortcut;
+        if (!accel) return false; // 空串 = 用户已禁用高亮快捷键
+        const pressed = keyboardEventToAccel(event);
+        if (pressed && pressed === accel) {
+          editor.chain().focus().toggleHighlight().run();
+          return true;
+        }
+        return false;
+      },
       handlePaste: (_view, event) => {
         // 三种主要场景：
         //   A. 浏览器复制图片：剪贴板同时有 text/html (<meta><img src=https://...>)
@@ -1488,7 +1514,35 @@ export function TiptapEditor({
             "files=", dt?.files?.length ?? 0,
             "view.dragging=", !!view.dragging);
           if (!dt) return false;
-          const isOsFileDrop = Array.from(dt.types ?? []).includes("Files");
+          const types = Array.from(dt.types ?? []);
+
+          // ── 从左侧目录树（NotesPanel）拖入一篇笔记 → 在落点插入 wiki 链接 [[标题|ID]] ──
+          // 拖源在 onDragStart 写入自定义 mime "application/x-kb-note"；与 OS 文件拖入
+          // （types 含 "Files"）、ProseMirror 内部节点拖拽（view.dragging 非空）互不干扰。
+          // 用 [[标题|ID]] 锚点形式：保存时 extractWikiLinks 直接取 ID 建反链，改名不失效。
+          if (types.includes("application/x-kb-note") && !view.dragging) {
+            event.preventDefault();
+            try {
+              const raw = dt.getData("application/x-kb-note");
+              const { id, title } = JSON.parse(raw) as { id: number; title: string };
+              if (!Number.isFinite(id)) return true;
+              const safeTitle = (title || "未命名").trim();
+              // 落点像素坐标 → doc position；落在无法解析的空白/padding 处回退到当前选区
+              const de = event as DragEvent;
+              const coords = view.posAtCoords({ left: de.clientX, top: de.clientY });
+              const pos = coords ? coords.pos : view.state.selection.from;
+              editor
+                .chain()
+                .focus()
+                .insertContentAt(pos, `[[${safeTitle}|${id}]] `)
+                .run();
+            } catch (e) {
+              message.error(`插入链接失败：${e}`);
+            }
+            return true;
+          }
+
+          const isOsFileDrop = types.includes("Files");
           if (!isOsFileDrop || view.dragging) return false;
 
           const videos = collectVideoFiles(dt);

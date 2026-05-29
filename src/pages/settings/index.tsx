@@ -59,6 +59,7 @@ import { FeatureModulesSection } from "@/components/settings/FeatureModulesSecti
 import OrphanAssetsPanel from "@/components/settings/OrphanAssetsPanel";
 import { HiddenPinSection } from "@/components/hidden/HiddenPinSection";
 import { ShortcutsSection } from "@/components/settings/ShortcutsSection";
+import { EditorHighlightShortcutRow } from "@/components/settings/EditorHighlightShortcutRow";
 import { MCPServerSection } from "@/components/settings/MCPServerSection";
 import { TiptapEditor } from "@/components/editor";
 import { ShareConfigModal } from "@/components/config-share/ShareConfigModal";
@@ -1746,6 +1747,9 @@ function DesktopSettingsPage() {
             onChange={setEditorFirstLineIndent}
           />
         </div>
+
+        {/* 高亮快捷键（编辑器内动作，键位可自定义；区别于上方系统级全局快捷键） */}
+        <EditorHighlightShortcutRow />
 
         <div
           style={{

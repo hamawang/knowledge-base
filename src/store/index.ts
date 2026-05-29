@@ -17,6 +17,7 @@ async function getConfigOrNull(key: string): Promise<string | null> {
 }
 import type { Folder, SystemInfo } from "@/types";
 import type { ThemeMode, ThemeCategory } from "@/theme/tokens";
+import { EDITOR_HIGHLIGHT_SHORTCUT_DEFAULT } from "@/lib/shortcuts/registry";
 import {
   DEFAULT_MOBILE_TAB_KEYS,
   MOBILE_TAB_KEYS as ALL_MOBILE_TAB_KEYS,
@@ -248,6 +249,13 @@ interface AppStore {
   /** 编辑器顶层段落首行缩进 2 字符（持久化） */
   editorFirstLineIndent: boolean;
   /**
+   * 编辑器「高亮」快捷键（accelerator 字符串，如 "CommandOrControl+Shift+H"，持久化）。
+   *
+   * 编辑器内动作，但允许用户自定义键位。TiptapEditor 用 handleKeyDown 实时读此值匹配触发，
+   * 并禁用了 Highlight 扩展内置的 Mod-Shift-h（避免双触发互相抵消）。空串 = 已禁用（不绑任何键）。
+   */
+  editorHighlightShortcut: string;
+  /**
    * 全局界面缩放因子（持久化）。
    * 取值见 UI_SCALE_OPTIONS；默认 1.0（首启会被 suggestUiScale 推荐值覆盖一次）。
    * 通过 :root --ui-scale 变量 + AntD ConfigProvider token 联动到全 UI。
@@ -451,6 +459,8 @@ interface AppStore {
   setEditorRuleLines: (mode: EditorRuleLines) => void;
   /** 切换首行缩进 */
   setEditorFirstLineIndent: (on: boolean) => void;
+  /** 设置编辑器高亮快捷键（accelerator 字符串；传空串 = 禁用高亮快捷键） */
+  setEditorHighlightShortcut: (accel: string) => void;
   /** 设置全局界面缩放（自动 clamp 到 [UI_SCALE_MIN, UI_SCALE_MAX]，标记用户已手动设置） */
   setUiScale: (scale: number) => void;
   /** 重置 uiScale 为 suggestUiScale() 推荐值（一键回归"自动"） */
@@ -538,6 +548,16 @@ const DEFAULT_ENABLED_VIEWS: Set<ActiveView> = new Set(
   OPTIONAL_VIEWS.filter((v) => v !== "cards"),
 );
 
+/**
+ * 本次版本「新增」且需要对老用户自动补开的默认开启可选视图。
+ *
+ * 背景：`enabled_views` 只存"已启用"列表，新增可选视图对老用户不会自动出现（见 loadEnabledViews）。
+ * 用 `known_views` 记录"settings 已对齐过的可选视图集合"做增量迁移；但老安装没有 known_views，
+ * 无法区分"用户主动关掉的旧视图" vs "本次新增的视图"，故这里显式列出本次新增项作为一次性引导。
+ * 迁移写入 known_views 后此列表即失效，后续新增视图靠 known_views 差量自动处理，无需再改这里。
+ */
+const NEW_DEFAULT_ON_VIEWS: readonly ActiveView[] = ["push"] as const;
+
 /** 移动端 Dashboard 可隐藏项（仅移动端用） */
 export type MobileDashboardItem =
   | "today_words" // 今日字数卡（蓝渐变）
@@ -592,6 +612,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   editorPaper: EDITOR_LAYOUT_DEFAULTS.paper,
   editorRuleLines: EDITOR_LAYOUT_DEFAULTS.ruleLines,
   editorFirstLineIndent: EDITOR_LAYOUT_DEFAULTS.firstLineIndent,
+  editorHighlightShortcut: EDITOR_HIGHLIGHT_SHORTCUT_DEFAULT,
   uiScale: UI_SCALE_DEFAULT,
   uiScaleUserSet: false,
   autoSaveEnabled: false,
@@ -704,15 +725,41 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
   loadEnabledViews: async () => {
     const raw = await getConfigOrNull("enabled_views");
-    if (!raw) return; // 无值 → 保留构造默认（除 cards 外全开）
+    if (!raw) return; // 无值 → 全新用户，保留构造默认（含本次新增的默认开启视图）
     try {
       const list = JSON.parse(raw) as ActiveView[];
-      if (Array.isArray(list)) {
-        // 只保留仍在 OPTIONAL_VIEWS 内的，防止旧版本残留的脏数据
-        const valid = list.filter((v) =>
-          OPTIONAL_VIEWS.includes(v as ActiveView),
-        );
-        set({ enabledViews: new Set(valid) });
+      if (!Array.isArray(list)) return;
+      // 只保留仍在 OPTIONAL_VIEWS 内的，防止旧版本残留的脏数据
+      const valid = list.filter((v) => OPTIONAL_VIEWS.includes(v as ActiveView));
+      const enabled = new Set<ActiveView>(valid);
+
+      // 增量迁移：新增的「默认开启」可选视图要对老用户自动出现，
+      // 但不能把用户主动关掉的旧视图重新打开。known_views = settings 已对齐过的可选视图集合。
+      const knownRaw = await getConfigOrNull("known_views");
+      const known: ActiveView[] = knownRaw
+        ? (JSON.parse(knownRaw) as ActiveView[])
+        : // 老安装无 known_views：视为已对齐过"本次新增项之前"的全部可选视图
+          OPTIONAL_VIEWS.filter((v) => !NEW_DEFAULT_ON_VIEWS.includes(v));
+      // 仅对"从未对齐过 + 默认开启"的新视图补开
+      let changed = false;
+      for (const v of OPTIONAL_VIEWS) {
+        if (DEFAULT_ENABLED_VIEWS.has(v) && !known.includes(v) && !enabled.has(v)) {
+          enabled.add(v);
+          changed = true;
+        }
+      }
+      set({ enabledViews: enabled });
+
+      // 回写：known_views 对齐到当前全量可选视图；若补开了视图，同步回写 enabled_views
+      void configApi
+        .set("known_views", JSON.stringify([...OPTIONAL_VIEWS]))
+        .catch((e) => console.warn("[settings] persist known_views failed:", e));
+      if (changed) {
+        void configApi
+          .set("enabled_views", JSON.stringify([...enabled]))
+          .catch((e) =>
+            console.warn("[settings] persist enabled_views failed:", e),
+          );
       }
     } catch (e) {
       console.warn("[settings] parse enabled_views failed:", e);
@@ -854,6 +901,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
   setEditorRuleLines: (mode) =>
     set({ editorRuleLines: mode === "lines" || mode === "grid" ? mode : "none" }),
   setEditorFirstLineIndent: (on) => set({ editorFirstLineIndent: !!on }),
+  setEditorHighlightShortcut: (accel) =>
+    set({ editorHighlightShortcut: typeof accel === "string" ? accel.trim() : "" }),
   setUiScale: (scale) => {
     const clamped = Math.max(UI_SCALE_MIN, Math.min(UI_SCALE_MAX, Number(scale) || UI_SCALE_DEFAULT));
     set({ uiScale: clamped, uiScaleUserSet: true });
@@ -1263,6 +1312,11 @@ export async function loadThemeFromStore() {
     if (typeof efi === "boolean") {
       useAppStore.getState().setEditorFirstLineIndent(efi);
     }
+    // 恢复编辑器高亮快捷键（空串是合法值 = 用户主动禁用，故只校验类型不校验非空）
+    const ehs = await store.get<string>("editorHighlightShortcut");
+    if (typeof ehs === "string") {
+      useAppStore.getState().setEditorHighlightShortcut(ehs);
+    }
 
     // 恢复界面缩放：用户已手动设置过就尊重持久化值，否则用本机推荐值
     const uiScaleUserSet = await store.get<boolean>("uiScaleUserSet");
@@ -1381,6 +1435,7 @@ export async function saveThemeToStore() {
       editorPaper,
       editorRuleLines,
       editorFirstLineIndent,
+      editorHighlightShortcut,
       uiScale,
       uiScaleUserSet,
       autoSaveEnabled,
@@ -1415,6 +1470,7 @@ export async function saveThemeToStore() {
     await store.set("editorPaper", editorPaper);
     await store.set("editorRuleLines", editorRuleLines);
     await store.set("editorFirstLineIndent", editorFirstLineIndent);
+    await store.set("editorHighlightShortcut", editorHighlightShortcut);
     await store.set("uiScale", uiScale);
     await store.set("uiScaleUserSet", uiScaleUserSet);
     await store.set("autoSaveEnabled", autoSaveEnabled);
@@ -1447,7 +1503,7 @@ useAppStore.subscribe((state) => {
   // notesHeadingFolded 摘要：用 entries 数 + 总 anchor 数 简化对比，避免每次 stringify 大对象
   const headingFoldEntries = Object.entries(state.notesHeadingFolded);
   const headingFoldKey = `${headingFoldEntries.length}:${headingFoldEntries.reduce((acc, [, v]) => acc + v.length, 0)}:${headingFoldEntries.map(([k, v]) => `${k}=${v.join(",")}`).join("|")}`;
-  const key = `${state.lightTheme}|${state.darkTheme}|${state.themeCategory}|${state.alwaysOnTop}|${state.sidePanelWidth}|${state.sidePanelVisible}|${state.autoHideActivityBar}|${state.recentSearches.join(",")}|${state.editorFontFamily}|${state.editorFontSize}|${state.editorLineHeight}|${state.editorReadingWidth}|${state.editorPaper}|${state.editorRuleLines}|${state.editorFirstLineIndent}|${state.uiScale}|${state.uiScaleUserSet}|${state.autoSaveEnabled}|${state.autoSaveDelay}|${state.outlineVisible}|${state.notesCollapsedFolderKeys.join(",")}|${state.notesUncategorizedExpanded}|${state.notesShowOnlyFolders}|${state.notesFoldersInitialCollapseDone}|${headingFoldKey}|${state.themeOverridesEnabled}|${state.customAccent ?? ""}|${state.customBgImage ?? ""}|${state.customBgDim}|${state.customBgBlur}|${state.customBgFit}`;
+  const key = `${state.lightTheme}|${state.darkTheme}|${state.themeCategory}|${state.alwaysOnTop}|${state.sidePanelWidth}|${state.sidePanelVisible}|${state.autoHideActivityBar}|${state.recentSearches.join(",")}|${state.editorFontFamily}|${state.editorFontSize}|${state.editorLineHeight}|${state.editorReadingWidth}|${state.editorPaper}|${state.editorRuleLines}|${state.editorFirstLineIndent}|${state.editorHighlightShortcut}|${state.uiScale}|${state.uiScaleUserSet}|${state.autoSaveEnabled}|${state.autoSaveDelay}|${state.outlineVisible}|${state.notesCollapsedFolderKeys.join(",")}|${state.notesUncategorizedExpanded}|${state.notesShowOnlyFolders}|${state.notesFoldersInitialCollapseDone}|${headingFoldKey}|${state.themeOverridesEnabled}|${state.customAccent ?? ""}|${state.customBgImage ?? ""}|${state.customBgDim}|${state.customBgBlur}|${state.customBgFit}`;
   if (key !== _prevPersistKey) {
     _prevPersistKey = key;
     saveThemeToStore();

@@ -8,6 +8,7 @@ import {
   type ShortcutDef,
 } from "@/lib/shortcuts/registry";
 import { shortcutsApi } from "@/lib/api";
+import { useAppStore } from "@/store";
 import type { ShortcutBinding } from "@/types";
 
 interface ShortcutsPanelProps {
@@ -25,6 +26,8 @@ interface ShortcutsPanelProps {
 export function ShortcutsPanel({ open, onClose }: ShortcutsPanelProps) {
   const { token } = antdTheme.useToken();
   const [bindings, setBindings] = useState<Map<string, ShortcutBinding>>(new Map());
+  // 高亮快捷键键位由用户自定义（存 store），帮助面板要显示实时值而非 registry 的默认值
+  const highlightAccel = useAppStore((s) => s.editorHighlightShortcut);
 
   useEffect(() => {
     if (!open) return;
@@ -40,11 +43,15 @@ export function ShortcutsPanel({ open, onClose }: ShortcutsPanelProps) {
       });
   }, [open]);
 
-  /** 解析单条要显示的 accel：global 走 binding，否则用 defaultAccel */
+  /** 解析单条要显示的 accel：global 走 binding，highlight 走 store 自定义值，其余用 defaultAccel */
   function resolveAccel(def: ShortcutDef): string {
     if (def.scope === "global") {
       const b = bindings.get(def.id);
       return b ? b.accel : def.defaultAccel;
+    }
+    // 编辑器高亮键位可自定义（store），实时反映用户改键 / 禁用（空串 → 显示"已禁用"）
+    if (def.id === "editor.highlight") {
+      return highlightAccel;
     }
     return def.defaultAccel;
   }

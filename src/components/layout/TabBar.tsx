@@ -5,6 +5,7 @@ import { X, ListTree } from "lucide-react";
 import { useTabsStore, type NoteTab } from "@/store/tabs";
 import { FileTypeIcon } from "@/components/FileTypeIcon";
 import { noteApi } from "@/lib/api";
+import { useAppStore } from "@/store";
 
 export function TabBar() {
   const { tabs, activeId, closeTab, closeOtherTabs, closeTabsToRight, getDraft, clearDraft } =
@@ -68,6 +69,8 @@ export function TabBar() {
     setClosing(true);
     try {
       await noteApi.update(confirmTab.id, { title: draft.title.trim(), content: draft.content });
+      // 标题可能被改过，让左侧 NotesPanel / 笔记列表重拉同步新标题
+      useAppStore.getState().bumpNotesRefresh();
       clearDraft(confirmTab.id);
       doClose(confirmTab.id);
       setConfirmTab(null);

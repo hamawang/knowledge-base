@@ -10,6 +10,11 @@ export interface WikiLinkOptions {
    * 没有 `id` 时（用户手敲的 `[[标题]]`）回退按 title 查。
    */
   onClick: (title: string, id?: number) => void;
+  /**
+   * 是否处于阅读模式（不可编辑）。函数式取值，保证编辑器实例只创建一次时仍能拿到实时态。
+   * 阅读态无光标定位需求 → 普通单击即跳转；编辑态仍要求 Ctrl/Cmd + 点击。
+   */
+  isReadingMode?: () => boolean;
 }
 
 // 识别两种形式：
@@ -64,12 +69,13 @@ export const WikiLinkDecoration = Extension.create<WikiLinkOptions>({
   name: "wikiLinkDecoration",
 
   addOptions() {
-    return { onClick: () => {} };
+    return { onClick: () => {}, isReadingMode: () => false };
   },
 
   addProseMirrorPlugins() {
     const pluginKey = new PluginKey<DecorationSet>("wikiLinkDecoration");
     const onClick = this.options.onClick;
+    const isReadingMode = this.options.isReadingMode;
 
     return [
       new Plugin({
@@ -85,9 +91,11 @@ export const WikiLinkDecoration = Extension.create<WikiLinkOptions>({
           decorations(state) {
             return pluginKey.getState(state) ?? DecorationSet.empty;
           },
-          // 仅 Ctrl/Cmd + 点击触发跳转，保留普通点击的光标定位
+          // 编辑态：仅 Ctrl/Cmd + 点击触发跳转，保留普通点击的光标定位。
+          // 阅读态：不可编辑、无光标定位需求 → 普通单击即跳转（与 Obsidian 阅读视图一致）。
           handleClick(_view, _pos, event) {
-            if (!(event.ctrlKey || event.metaKey)) return false;
+            const reading = isReadingMode?.() ?? false;
+            if (!reading && !(event.ctrlKey || event.metaKey)) return false;
             const target = event.target as HTMLElement | null;
             const el = target?.closest("[data-wiki-link]") as HTMLElement | null;
             if (!el) return false;

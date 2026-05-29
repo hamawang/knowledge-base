@@ -11,6 +11,7 @@ import {
   theme as antdTheme,
 } from "antd";
 import { MarkdownContent as Markdown } from "@/components/ai/MarkdownContent";
+import { useAppStore } from "@/store";
 import {
   Sparkles,
   RefreshCcw,
@@ -113,6 +114,9 @@ export function DraftNoteModal({ open, onClose, onSaved }: DraftNoteModalProps) 
         folder_id: folderId,
       });
       message.success("已保存");
+      // 让左侧 NotesPanel / 笔记列表重拉，新建笔记与（ensurePath 可能新建的）文件夹立即出现
+      useAppStore.getState().bumpNotesRefresh();
+      useAppStore.getState().bumpFoldersRefresh();
       onSaved?.(note.id);
       reset();
       onClose();

@@ -214,6 +214,8 @@ function DesktopHomePage() {
       setQuickNote("");
       // 也刷新最近笔记列表(daily 会出现在最近)
       loadDashboard();
+      // getOrCreate 可能新建今日日记 → 让左侧 NotesPanel / 笔记列表重拉，新日记立即出现
+      useAppStore.getState().bumpNotesRefresh();
     } catch (e) {
       message.error(`保存失败: ${e}`);
     } finally {

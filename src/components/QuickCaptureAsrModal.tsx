@@ -17,6 +17,7 @@ import { Modal, Button, Input, Space, Alert, Typography, App as AntdApp } from "
 import { Square, Loader2 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { asrApi, taskApi, noteApi, aiPlanApi } from "@/lib/api";
+import { useAppStore } from "@/store";
 import { useAudioLevel } from "@/hooks/useAudioLevel";
 import { useSilenceAutoStop } from "@/hooks/useSilenceAutoStop";
 
@@ -244,6 +245,8 @@ export function QuickCaptureAsrModal({ open, onClose }: Props) {
         content: text.trim(),
         folder_id: null,
       });
+      // 让左侧 NotesPanel / 笔记列表重拉，新建的语音笔记立即出现在「未分类」
+      useAppStore.getState().bumpNotesRefresh();
       message.success("已保存为笔记");
       onClose();
     } catch (e) {

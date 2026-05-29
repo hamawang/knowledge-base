@@ -940,21 +940,20 @@ function DesktopNoteListPage() {
       const oldIdx = data.items.findIndex((n) => String(n.id) === String(active.id));
       const newIdx = data.items.findIndex((n) => String(n.id) === String(over.id));
       if (oldIdx < 0 || newIdx < 0) return;
-      // 同档校验：list_notes 第一排序键是 is_pinned DESC，跨档拖排会被 ORDER BY 拉回原档，
-      // 视觉上"跳到最上"非常迷惑 → 直接拒绝
-      const dragNote = data.items[oldIdx];
-      const dropNote = data.items[newIdx];
-      if (dragNote.is_pinned !== dropNote.is_pinned) {
-        message.info(
-          dragNote.is_pinned
-            ? "置顶笔记不能拖到普通笔记之间（先取消置顶）"
-            : "普通笔记不能拖到置顶笔记之间（先置顶它）",
-        );
-        return;
-      }
+      // 列表恒按 is_pinned DESC 分档（置顶档在上、普通档在下），自定义排序的
+      // sort_order 只在各档内部生效。跨档拖动（如把普通笔记拖到置顶笔记上 →
+      // 想排到置顶项正下方）不再拒绝：arrayMove 后再做一次稳定分档排序，让乐观
+      // 结果与后端 ORDER BY 重新分档后的顺序一致（普通笔记吸附到普通档顶部），
+      // 既不闪烁也能达成"已置顶一篇、把另一篇排到第二位"。
       // 乐观更新当前页（用户立即看到拖动效果）
       const reordered = arrayMove(data.items, oldIdx, newIdx);
-      setData((prev) => ({ ...prev, items: reordered }));
+      const stable = reordered
+        .map((n, i) => ({ n, i }))
+        .sort((a, b) =>
+          a.n.is_pinned !== b.n.is_pinned ? (a.n.is_pinned ? -1 : 1) : a.i - b.i,
+        )
+        .map((x) => x.n);
+      setData((prev) => ({ ...prev, items: stable }));
       try {
         // 关键：必须用当前筛选条件下的「全量」id 列表 reorder，
         // 仅传当前页 12 条会让其它页 sort_order 撞车（0/1000/...重复），
@@ -1367,6 +1366,9 @@ function DesktopNoteListPage() {
                 setBatchMoveOpen(false);
                 await loadNotes(data.page);
                 useAppStore.getState().bumpFoldersRefresh();
+                // 同步刷新左侧 NotesPanel 的「未分类」/ 目标文件夹笔记列表，
+                // 否则移走的笔记仍残留在左侧「未分类」下（仅右侧列表更新了）
+                useAppStore.getState().bumpNotesRefresh();
               } catch (e) {
                 message.error(`移动失败: ${e}`);
               }

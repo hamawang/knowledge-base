@@ -921,28 +921,35 @@ export function NotesPanel() {
       if (dropNoteId === noteId) return;
       const dropNote = findNoteById(dropNoteId);
       if (!dropNote) return;
-      // 同档校验：list_notes 第一排序键是 is_pinned DESC，置顶笔记永远在前。
-      // 跨档拖排 sort_order 写入后视觉上会"跳回"置顶档，体验非常迷惑——直接拒绝
-      if (note.is_pinned !== dropNote.is_pinned) {
-        message.info(
-          note.is_pinned
-            ? "置顶笔记不能拖到普通笔记之间（先取消置顶）"
-            : "普通笔记不能拖到置顶笔记之间（先置顶它）",
-        );
-        return;
-      }
       const siblings: Note[] =
         targetFolderId == null
           ? uncategorizedNotes
           : (notesByFolder.get(targetFolderId) ?? []);
       const withoutDrag = siblings.filter((n) => n.id !== noteId);
-      const dropIdx = withoutDrag.findIndex((n) => n.id === dropNoteId);
-      if (dropIdx < 0) return;
-      // antd Tree 的 dropPosition 相对父级位置；diff 出 dropOffset 判断"落在前/后"
-      const posArr = info.node.pos.split("-");
-      const dropOffset =
-        info.dropPosition - Number(posArr[posArr.length - 1]);
-      const insertIdx = dropOffset > 0 ? dropIdx + 1 : dropIdx;
+      // 列表恒按 is_pinned DESC 分档（置顶档在上、普通档在下），自定义排序的
+      // sort_order 只在各档内部生效（list_notes: "is_pinned DESC, sort_order ASC"）。
+      // 跨档拖动（拖普通笔记落在置顶笔记上/旁，或反之）不再拒绝，而是"吸附到本档边界"：
+      //   - 普通笔记跨档 → 落到普通档顶部（= 置顶档正下方），
+      //     正好满足"已置顶一篇，想把另一篇排到第二位"
+      //   - 置顶笔记跨档 → 落到置顶档底部
+      // 边界点 = 最后一个置顶笔记之后；插到这里后 reorder 写入的 sort_order 再经
+      // is_pinned 分档稳定排序，dragNote 恰好落在该处，乐观更新不会闪。
+      let insertIdx: number;
+      if (note.is_pinned !== dropNote.is_pinned) {
+        let lastPinnedIdx = -1;
+        withoutDrag.forEach((n, i) => {
+          if (n.is_pinned) lastPinnedIdx = i;
+        });
+        insertIdx = lastPinnedIdx + 1;
+      } else {
+        const dropIdx = withoutDrag.findIndex((n) => n.id === dropNoteId);
+        if (dropIdx < 0) return;
+        // antd Tree 的 dropPosition 相对父级位置；diff 出 dropOffset 判断"落在前/后"
+        const posArr = info.node.pos.split("-");
+        const dropOffset =
+          info.dropPosition - Number(posArr[posArr.length - 1]);
+        insertIdx = dropOffset > 0 ? dropIdx + 1 : dropIdx;
+      }
       const newOrder = [...withoutDrag];
       newOrder.splice(insertIdx, 0, note);
       // 乐观更新：startTransition 让 antd Tree 先完成 onDrop 内部清理 paint，
@@ -2175,6 +2182,29 @@ export function NotesPanel() {
                     if (creatingUnderKey && k.startsWith(NEW_NODE_PREFIX)) return false;
                     return true;
                   },
+                }}
+                onDragStart={({ event, node }) => {
+                  // 笔记叶子拖出树外（如拖进编辑器正文）时，写入自定义 mime 负载，
+                  // 供 TiptapEditor 的 drop 处理识别 → 在落点插入 [[标题|ID]] wiki 链接。
+                  // 仅对笔记生效；文件夹拖拽仍是 Tree 内部移动（handleDrop），二者互不干扰。
+                  // antd Tree 内部重排靠 React state（dragNode）跟踪，不读 dataTransfer，
+                  // 故此处写入不影响树内拖动。
+                  const key = String(node.key);
+                  if (!isNoteKey(key)) return;
+                  const id = noteIdFromKey(key);
+                  const note = findNoteById(id);
+                  const title = note?.title || "未命名";
+                  try {
+                    event.dataTransfer.setData(
+                      "application/x-kb-note",
+                      JSON.stringify({ id, title }),
+                    );
+                    // 纯文本兜底：拖到外部 input / 其他可编辑区时退化为 [[标题]]
+                    event.dataTransfer.setData("text/plain", `[[${title}]]`);
+                    event.dataTransfer.effectAllowed = "copyLink";
+                  } catch {
+                    // 个别环境 dataTransfer 只读，安静失败，不影响树内拖动
+                  }
                 }}
                 onDrop={handleDrop}
                 onDragEnd={cancelHoverExpand}
