@@ -30,3 +30,11 @@ ar = "D:/software/dev/android-sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/win
 [build]
 # target-dir 不在这里强制（移动端跑命令时设 CARGO_TARGET_DIR 环境变量，
 # 桌面端继续用项目内 target/，与 .gitignore 现状一致）
+
+# rustc 线程栈大小（字节）= 32 MB。
+# 背景：`tauri dev`（带 --cfg dev）编译 lib 时，`generate_handler!` 生成的命令分发类型图
+# 很大，命令数量增长到一定程度会让 rustc typeck 递归超过默认线程栈（8MB），
+# 在 Windows 上崩成 `STATUS_STACK_BUFFER_OVERRUN`（exit 0xc0000409）而非给出报错。
+# 调大到 32MB 一劳永逸；force=true 确保即使外部没设也强制生效。
+[env]
+RUST_MIN_STACK = { value = "33554432", force = true }
