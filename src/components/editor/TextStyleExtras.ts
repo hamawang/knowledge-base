@@ -302,16 +302,21 @@ function makeIndentMarkdownStorage(parentStorage: Record<string, unknown>) {
         }
         // 空段落：Markdown 没有"空段落"概念，markdown-it 会把多个连续空行折叠成
         // 单个段落分隔符，导致用户按 Enter 留出的视觉空行保存后丢失。改写为
-        // <p><br></p> HTML 块（依赖 html: true），markdown-it 原样保留 HTML 块，
-        // 重读时解析回带 hardBreak 的段落，视觉空行被保留。
+        // <p></p> HTML 块（依赖 html: true），markdown-it 原样保留 HTML 块，
+        // 重读时解析回空段落（content.size===0），视觉空行被保留。
         //
-        // R-004 round-trip：第一次保存 size===0 走这条分支输出 <p><br></p>，但 ProseMirror
-        // 的 DOMParser 把 <p><br></p> 解析回 paragraph + hardBreak（content.size===1）。
-        // 第二次保存时如果只检查 size===0 会错过这种"实际为空"的段落 → 退回普通空行 →
-        // markdown-it 又折叠 → 第二次保存丢空行。修复：把判定放宽到"内容仅含 hardBreak
-        // 或仅含空白文本"的情况。
+        // ⚠ 必须输出 <p></p> 而非 <p><br></p>：后者解析回「段落 + 一个 hardBreak」，
+        //   而 ProseMirror 渲染空段落时本就会补一个尾随 <br>（ProseMirror-trailingBreak），
+        //   两个 <br> 叠加 → 空段落渲染成 2 行高。表现为「用户敲 1 个空行，保存重开后
+        //   变成 2 行空行」（且第二轮 isEffectivelyEmpty 仍判定为空 → 再写 <p><br></p> →
+        //   稳定停在 2 行）。改成无 <br> 的 <p></p> 后渲染恒为 1 行，且历史遗留的
+        //   <p><br></p>（解析成含 hardBreak 的段落）会被 isEffectivelyEmpty 命中、重写成
+        //   <p></p> 自愈。
+        //
+        // round-trip 幂等：size===0 与「仅含 hardBreak（历史形态）」「仅含空白文本」都算
+        // 空段落，统一输出 <p></p>，避免 markdown-it 折叠空行导致空行丢失。
         if (name === "paragraph" && htmlAllowed && isEffectivelyEmpty(node)) {
-          state.write("<p><br></p>");
+          state.write("<p></p>");
           state.closeBlock(node);
           return;
         }

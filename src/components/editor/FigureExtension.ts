@@ -161,7 +161,14 @@ export const FigureImage = ImageResize.extend({
             c === "(" ? "%28" : "%29",
           );
           state.write(`![${altText}](${url})`);
-          // image 在普通 markdown 里是 inline，不需要 closeBlock
+          // ⚠ 本扩展配置为 inline:false（块级图片），块级节点序列化后必须 closeBlock，
+          // 否则后续块会与图片粘在同一行，产生 `![]()<p>...` 畸形结构（图片后的回车/
+          // 空段落紧贴）。下次加载时 markdown-it 把紧贴的 <p> 当「行内 HTML」解析进图片
+          // 所在段落，形成非法嵌套 <p>，每次往返多裂出一个空段落 → 图片后空行无限递增、
+          // 且「打开即 dirty」。仅块级图片需要 closeBlock；万一将来配 inline:true 则跳过。
+          if (!node.type.isInline) {
+            state.closeBlock(node);
+          }
         },
         parse: {
           // markdown 解析由 markdown-it 处理：标准 ![alt](url) 自动还原；

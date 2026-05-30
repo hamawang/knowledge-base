@@ -735,6 +735,20 @@ export function TiptapEditor({
   }, [onChange]);
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingEditorRef = useRef<{ storage: unknown } | null>(null);
+  // 「上一次上报给父组件的 markdown」基线。用于过滤掉不改变 markdown 的 onUpdate：
+  //   1. 图片 NodeView（ImageResize）挂载后回写 containerStyle/wrapperStyle 等样式属性，
+  //      会触发 onUpdate，但这些属性不参与 markdown 序列化 → getMarkdown 不变。
+  //   2. DB 里存的内容若不是「序列化定点」（如历史遗留 `<p><br></p>` 空段落），加载后
+  //      编辑器持有的是归一化结果，与 DB 原文不同；若直接上报会被父组件判定为 dirty
+  //      （"打开就提示未保存"）。基线设为加载后编辑器的真实输出，可避免误判。
+  // 仅当输出相对基线真正变化（用户实际编辑）才上报 onChange → setDirty。
+  const lastEmittedRef = useRef<string | null>(null);
+  const emitIfChanged = useCallback((pending: { storage: unknown }) => {
+    const md = getEditorMarkdown(pending);
+    if (md === lastEmittedRef.current) return; // 内容未实质变化，不上报、不标 dirty
+    lastEmittedRef.current = md;
+    onChangeRef.current(md);
+  }, []);
   const flushNow = useCallback(() => {
     if (flushTimerRef.current) {
       clearTimeout(flushTimerRef.current);
@@ -743,9 +757,9 @@ export function TiptapEditor({
     const pending = pendingEditorRef.current;
     if (pending) {
       pendingEditorRef.current = null;
-      onChangeRef.current(getEditorMarkdown(pending));
+      emitIfChanged(pending);
     }
-  }, []);
+  }, [emitIfChanged]);
 
   /** 处理图片文件：并发保存后一次性批量插入编辑器 */
   const handleImageFiles = useCallback(
@@ -1391,6 +1405,10 @@ export function TiptapEditor({
       } catch (e) {
         console.warn("[video] backfill ids failed:", e);
       }
+      // 建立 dirty 基线：编辑器加载初始 content（+ math/video 迁移）后的真实序列化输出。
+      // 后续 onUpdate 以此为基准判断是否「实质变化」，避免 NodeView 属性回写 / DB 非定点
+      // 内容归一化被误判为用户编辑（"打开就提示未保存"）。
+      lastEmittedRef.current = getEditorMarkdown(editor);
     },
     onUpdate: ({ editor }) => {
       if (isExternalUpdate.current) return;
@@ -1401,7 +1419,7 @@ export function TiptapEditor({
         const pending = pendingEditorRef.current;
         if (pending) {
           pendingEditorRef.current = null;
-          onChangeRef.current(getEditorMarkdown(pending));
+          emitIfChanged(pending);
         }
       }, 300);
     },
@@ -1790,6 +1808,10 @@ export function TiptapEditor({
         console.warn("[codeBlock] normalize fence attrs failed:", e);
       }
       isExternalUpdate.current = false;
+      // 重置 dirty 基线为「本次外部内容加载后的真实序列化输出」（切换笔记 / 外部更新）。
+      // 与 onCreate 同理：DB 内容若非序列化定点，这里记录归一化结果，避免随后的
+      // NodeView 属性回写触发 onUpdate 时被误判为用户编辑。
+      lastEmittedRef.current = getEditorMarkdown(editor);
     }
   }, [content, editor]);
 

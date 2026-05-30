@@ -1694,6 +1694,12 @@ function DesktopNoteEditorPage() {
   }
 
   function handleContentChange(val: string) {
+    // 序列化结果与当前内容完全一致 → 本次 onUpdate 不是真实编辑，不标记 dirty。
+    // 典型来源：图片 NodeView（ImageResize）挂载后回写 containerStyle/wrapperStyle 等
+    // 样式属性触发 onUpdate，但这些属性不参与 markdown 序列化，getMarkdown 输出不变。
+    // 之前无条件 setDirty 导致"打开含图片的笔记、没做任何修改就提示未保存"。
+    // 注意：真实编辑时 val 必然 !== content，照常走 dirty 分支，不受影响。
+    if (val === content) return;
     setContent(val);
     setDirty(true);
     setTabDirty(noteId, true);
