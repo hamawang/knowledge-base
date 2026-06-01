@@ -17,7 +17,7 @@ import {
 } from "antd";
 import type { InputRef, MenuProps, RefSelectProps } from "antd";
 import dayjs, { type Dayjs } from "dayjs";
-import { Plus, NotebookText, Folder as FolderIcon, File as FileIcon, Link as LinkIcon, X } from "lucide-react";
+import { Plus, NotebookText, Folder as FolderIcon, File as FileIcon, Link as LinkIcon, X, Settings } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useNavigate } from "react-router-dom";
 import { taskApi, taskCategoryApi, noteApi, configApi, projectApi } from "@/lib/api";
@@ -34,6 +34,7 @@ import type {
   CreateTaskInput,
 } from "@/types";
 import { SubtaskList } from "./SubtaskList";
+import { ProjectManageModal } from "./ProjectManageModal";
 import { MicButton } from "@/components/MicButton";
 
 type RepeatMode = "none" | "daily" | "weekdays" | "weekly" | "monthly" | "custom";
@@ -111,6 +112,12 @@ export function CreateTaskModal({
   // ─── 项目 + 起始日（v41） ─────────────────────
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState<number | null>(null);
+  /** 项目下拉内联新建：是否展开输入框 / 输入值 / 创建中 */
+  const [projectCreating, setProjectCreating] = useState(false);
+  const [newProjectName, setNewProjectName] = useState("");
+  const [projectSaving, setProjectSaving] = useState(false);
+  /** 项目管理弹窗（改名/改色/归档/删除）；从下拉 footer 的"管理"打开 */
+  const [projectManageOpen, setProjectManageOpen] = useState(false);
   /** 甘特图起始日；可单独存在（没截止也行）或与 dueDate 组成区间 */
   const [startDate, setStartDate] = useState<Dayjs | null>(null);
   // ─── 草稿子任务（仅新建模式用） ────────────────
@@ -252,6 +259,8 @@ export function CreateTaskModal({
     setNoteOptions([]);
     setDraftSubtasks([]);
     setDraftSubInput("");
+    setProjectCreating(false);
+    setNewProjectName("");
   }, [open, editing, presetPriority, presetImportant, presetDueDate, presetCategoryId]);
 
   /** 拉候选笔记：keyword 空 → 最近 8 条，非空 → 模糊搜前 10 条 */
@@ -333,6 +342,35 @@ export function CreateTaskModal({
       setLinks((prev) => [...prev, { kind: "path", target: picked, label }]);
     } catch (e) {
       message.error(`选择${directory ? "目录" : "文件"}失败: ${e}`);
+    }
+  }
+
+  /**
+   * 下拉内联新建项目：只收名称，颜色按现有项目数轮转取预设色（避免清一色）。
+   * 起始/结束日期、描述等高级字段留给甘特图视图的"项目管理"补充。
+   * 创建成功后刷新项目列表并自动选中新项目。
+   */
+  async function handleCreateProject() {
+    const name = newProjectName.trim();
+    if (!name) {
+      message.warning("请输入项目名称");
+      return;
+    }
+    setProjectSaving(true);
+    try {
+      const color =
+        PROJECT_PRESET_COLORS[projects.length % PROJECT_PRESET_COLORS.length];
+      const newId = await projectApi.create({ name, color });
+      const list = await projectApi.list(false);
+      setProjects(list);
+      setProjectId(newId);
+      setNewProjectName("");
+      setProjectCreating(false);
+      message.success("项目已创建并选中");
+    } catch (e) {
+      message.error(`创建项目失败: ${e}`);
+    } finally {
+      setProjectSaving(false);
     }
   }
 
@@ -468,6 +506,7 @@ export function CreateTaskModal({
   };
 
   return (
+    <>
     <Modal
       title={isEdit ? "编辑任务" : "新建任务"}
       open={open}
@@ -655,6 +694,82 @@ export function CreateTaskModal({
                   ),
                 })),
               ]}
+              popupRender={(menu) => (
+                <div>
+                  {menu}
+                  <div
+                    style={{
+                      borderTop: `1px solid ${token.colorBorderSecondary}`,
+                      marginTop: 4,
+                      paddingTop: 4,
+                    }}
+                  >
+                    {projectCreating ? (
+                      <div
+                        className="flex items-center gap-1 px-2 py-1"
+                        // 阻止 mousedown 冒泡，避免点输入框时下拉收起
+                        onMouseDown={(e) => e.preventDefault()}
+                      >
+                        <Input
+                          autoFocus
+                          size="small"
+                          value={newProjectName}
+                          onChange={(e) => setNewProjectName(e.target.value)}
+                          onPressEnter={(e) => {
+                            e.stopPropagation();
+                            void handleCreateProject();
+                          }}
+                          placeholder="项目名称，回车创建"
+                          maxLength={64}
+                          disabled={projectSaving}
+                        />
+                        <Button
+                          size="small"
+                          type="primary"
+                          loading={projectSaving}
+                          onClick={() => void handleCreateProject()}
+                        >
+                          创建
+                        </Button>
+                        <Button
+                          size="small"
+                          type="text"
+                          onClick={() => {
+                            setProjectCreating(false);
+                            setNewProjectName("");
+                          }}
+                        >
+                          取消
+                        </Button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center justify-between gap-1">
+                        <Button
+                          type="text"
+                          size="small"
+                          icon={<Plus size={12} />}
+                          style={{ flex: 1, justifyContent: "flex-start" }}
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={() => setProjectCreating(true)}
+                        >
+                          新建项目
+                        </Button>
+                        <Button
+                          type="text"
+                          size="small"
+                          icon={<Settings size={12} />}
+                          style={{ color: token.colorTextTertiary }}
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={() => setProjectManageOpen(true)}
+                          title="项目管理（改名 / 改色 / 归档 / 删除）"
+                        >
+                          管理
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
             />
           </div>
           <div>
@@ -1131,6 +1246,24 @@ export function CreateTaskModal({
         )}
       </div>
     </Modal>
+    {/* 项目管理弹窗：从项目下拉 footer 的"管理"打开；关闭后刷新项目列表（改名/删除/归档需即时反映到下拉） */}
+    <ProjectManageModal
+      open={projectManageOpen}
+      onClose={() => setProjectManageOpen(false)}
+      onChanged={() => {
+        projectApi
+          .list(false)
+          .then((list) => {
+            setProjects(list);
+            // 当前选中的项目若已被删除/归档（不在列表里），清掉失效选中避免下拉显示空 id
+            setProjectId((prev) =>
+              prev != null && !list.some((p) => p.id === prev) ? null : prev,
+            );
+          })
+          .catch(() => {});
+      }}
+    />
+    </>
   );
 }
 
@@ -1145,6 +1278,19 @@ function formatReminderAt(t: Dayjs): string {
   if (diff === -1) return `昨天 ${hm}`;
   return `${t.format("YYYY-MM-DD")} ${hm}`;
 }
+
+/** 项目预设色（与 ProjectManageModal 一致）：内联新建项目时按项目数轮转取色 */
+const PROJECT_PRESET_COLORS = [
+  "#1677ff",
+  "#52c41a",
+  "#faad14",
+  "#ff4d4f",
+  "#722ed1",
+  "#13c2c2",
+  "#eb2f96",
+  "#fa8c16",
+  "#8c8c8c",
+];
 
 /** 星期选项：ISO 1=Mon..7=Sun */
 const WEEKDAY_OPTIONS = [
