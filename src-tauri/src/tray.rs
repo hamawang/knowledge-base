@@ -85,7 +85,17 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let icon = app.default_window_icon().ok_or("应用图标未配置")?.clone();
+    // 开发环境：给托盘图标右下角叠加一个橙色小圆点角标，方便和正式安装版的实例区分
+    let base_icon = app.default_window_icon().ok_or("应用图标未配置")?;
+    let icon: tauri::image::Image<'static> = if cfg!(debug_assertions) {
+        add_dev_badge(base_icon)
+    } else {
+        tauri::image::Image::new_owned(
+            base_icon.rgba().to_vec(),
+            base_icon.width(),
+            base_icon.height(),
+        )
+    };
 
     let tooltip: &str = if cfg!(debug_assertions) {
         "知识库 [DEV]"
@@ -191,6 +201,50 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .build(app)?;
 
     Ok(())
+}
+
+/// 给托盘图标右下角叠一个橙色小圆点角标（仅开发环境用，便于区分 dev 实例 / 正式安装版）。
+///
+/// 直接在图标 RGBA 像素上画一个小实心圆 + 一圈深橙描边（保证任何底色都看得清），
+/// 不做半透明混合。半径取短边的 0.18，圆心落在右下角内缩 1px 处。
+fn add_dev_badge(icon: &tauri::image::Image<'_>) -> tauri::image::Image<'static> {
+    let w = icon.width();
+    let h = icon.height();
+    let mut rgba = icon.rgba().to_vec();
+    if w == 0 || h == 0 || rgba.len() < (w * h * 4) as usize {
+        // 数据异常就原样返回，别越界乱画
+        return tauri::image::Image::new_owned(rgba, w, h);
+    }
+
+    // 角标半径取短边的 0.18（小角标即可，够眼睛分辨就行），圆心落在右下角内缩 1px
+    let r = (w.min(h) as f32) * 0.18;
+    let cx = w as f32 - r - 1.0;
+    let cy = h as f32 - r - 1.0;
+    let edge = r * 0.25; // 外圈深橙描边宽度
+
+    for y in 0..h {
+        for x in 0..w {
+            let dx = x as f32 + 0.5 - cx;
+            let dy = y as f32 + 0.5 - cy;
+            let dist = (dx * dx + dy * dy).sqrt();
+            if dist > r {
+                continue;
+            }
+            let idx = ((y * w + x) * 4) as usize;
+            // 外缘一圈深橙描边、内部亮橙实心
+            let (cr, cg, cb) = if dist >= r - edge {
+                (198u8, 80, 0)
+            } else {
+                (255u8, 149, 0)
+            };
+            rgba[idx] = cr;
+            rgba[idx + 1] = cg;
+            rgba[idx + 2] = cb;
+            rgba[idx + 3] = 255;
+        }
+    }
+
+    tauri::image::Image::new_owned(rgba, w, h)
 }
 
 /// 把主窗口从最小化/隐藏中恢复并聚焦
