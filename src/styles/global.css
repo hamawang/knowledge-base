@@ -336,7 +336,7 @@ body,
 }
 .editor-body[data-outline="on"] {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 200px;
+  grid-template-columns: minmax(0, 1fr) 170px;
   align-items: start;
 }
 

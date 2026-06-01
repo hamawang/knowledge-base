@@ -687,10 +687,10 @@ function DesktopNoteEditorPage() {
   const splitterDragRef = useRef<{ startX: number; startWidth: number; latest: number } | null>(null);
 
   /** 右侧大纲宽度（像素，持久化到 localStorage；双击分隔条还原到默认） */
-  const OUTLINE_DEFAULT_WIDTH = 200;
+  const OUTLINE_DEFAULT_WIDTH = 170;
   const [outlineWidth, setOutlineWidth] = useState<number>(() => {
     const saved = Number(localStorage.getItem("editor.outlineWidth"));
-    return Number.isFinite(saved) && saved >= 160 ? saved : OUTLINE_DEFAULT_WIDTH;
+    return Number.isFinite(saved) && saved >= 140 ? saved : OUTLINE_DEFAULT_WIDTH;
   });
   const outlineDragRef = useRef<{ startX: number; startWidth: number; latest: number } | null>(null);
 
@@ -743,6 +743,8 @@ function DesktopNoteEditorPage() {
   }, [editorInstance]);
   const outlineVisible = useAppStore((s) => s.outlineVisible);
   const toggleOutline = useAppStore((s) => s.toggleOutline);
+  // 阅读列宽（px，0=不限制）。隐藏大纲时把大纲腾出的横向空间补给正文，避免两侧空白过大。
+  const editorReadingWidth = useAppStore((s) => s.editorReadingWidth);
   const autoSaveEnabled = useAppStore((s) => s.autoSaveEnabled);
   const autoSaveDelay = useAppStore((s) => s.autoSaveDelay);
   /**
@@ -2031,7 +2033,16 @@ function DesktopNoteEditorPage() {
           }),
         }}
       >
-        <div className="editor-content-area">
+        <div
+          className="editor-content-area"
+          style={
+            // 隐藏大纲 + 设了阅读列宽时：把大纲列(含 6px 分隔条)腾出的宽度补给正文，
+            // 让编辑区随之变宽、收窄两侧空白。readingWidth=0(不限制)时不覆盖，沿用铺满逻辑。
+            !effectiveOutlineVisible && editorReadingWidth > 0
+              ? { maxWidth: editorReadingWidth + outlineWidth + 6 }
+              : undefined
+          }
+        >
           {/* 标题：用 position:relative 父级 + 绝对定位 mic / clear 模拟 suffix。
               不直接用 antd Input.suffix / allowClear——两者都会包一层
               .ant-input-affix-wrapper 把 borderless 大标题撑成白底大框。 */}
@@ -2146,7 +2157,7 @@ function DesktopNoteEditorPage() {
                 if (!ref) return;
                 // 鼠标向左 → 大纲变宽（X 减小）
                 const delta = ref.startX - ev.clientX;
-                const next = Math.max(160, Math.min(480, ref.startWidth + delta));
+                const next = Math.max(140, Math.min(480, ref.startWidth + delta));
                 ref.latest = next;
                 setOutlineWidth(next);
               };
