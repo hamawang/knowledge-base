@@ -2050,6 +2050,13 @@ function DesktopNoteEditorPage() {
             <Input
               value={title}
               onChange={(e) => handleTitleChange(e.target.value)}
+              onPressEnter={(e) => {
+                // 填完标题回车 → 焦点跳到正文末尾，直接接着写（阅读模式不抢焦点）
+                e.preventDefault();
+                if (!readingMode && editorInstance) {
+                  editorInstance.chain().focus("end").run();
+                }
+              }}
               placeholder="笔记标题"
               variant="borderless"
               className="editor-title"
