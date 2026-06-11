@@ -1,18 +1,19 @@
 import { useState } from "react";
 import { Button, Modal, Tag, Typography } from "antd";
 import {
-  RocketOutlined,
-  ThunderboltOutlined,
   RightOutlined,
   CopyOutlined,
   CheckOutlined,
-  AppstoreOutlined,
-  CodeOutlined,
-  KeyOutlined,
-  CloudServerOutlined,
-  CameraOutlined,
 } from "@ant-design/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
+// 产品 logo —— 各软件真实图标
+import aicoderLogo from "@/assets/promo/aicoder.png";
+import sigilLogo from "@/assets/promo/sigil.svg";
+import reeveLogo from "@/assets/promo/reeve.png";
+import ruoyiLogo from "@/assets/promo/ruoyi.png";
+import tauriLogo from "@/assets/promo/tauri.svg";
+import workstationLogo from "@/assets/promo/workstation.svg";
+import agileshotLogo from "@/assets/promo/agileshot.png";
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -52,7 +53,7 @@ export function RecommendCards() {
         onMouseEnter={(e) => (e.currentTarget.style.borderColor = "var(--ant-color-primary)")}
         onMouseLeave={(e) => (e.currentTarget.style.borderColor = "var(--ant-color-border)")}
       >
-        <RocketOutlined style={{ fontSize: 20, color: "var(--ant-color-primary)" }} />
+        <img src={ruoyiLogo} alt="" style={{ width: 22, height: 22, objectFit: "contain" }} />
         <div style={{ flex: 1, minWidth: 0 }}>
           <Text strong style={{ fontSize: 13 }}>
             RuoYi-Plus-UniApp
@@ -72,7 +73,7 @@ export function RecommendCards() {
         onMouseEnter={(e) => (e.currentTarget.style.borderColor = "var(--ant-color-primary)")}
         onMouseLeave={(e) => (e.currentTarget.style.borderColor = "var(--ant-color-border)")}
       >
-        <ThunderboltOutlined style={{ fontSize: 20, color: "var(--ant-color-primary)" }} />
+        <img src={tauriLogo} alt="" style={{ width: 22, height: 22, objectFit: "contain" }} />
         <div style={{ flex: 1, minWidth: 0 }}>
           <Text strong style={{ fontSize: 13 }}>
             灵动桌面应用开发框架
@@ -92,7 +93,7 @@ export function RecommendCards() {
         onMouseEnter={(e) => (e.currentTarget.style.borderColor = "var(--ant-color-primary)")}
         onMouseLeave={(e) => (e.currentTarget.style.borderColor = "var(--ant-color-border)")}
       >
-        <AppstoreOutlined style={{ fontSize: 20, color: "var(--ant-color-primary)" }} />
+        <img src={workstationLogo} alt="" style={{ width: 22, height: 22, objectFit: "contain" }} />
         <div style={{ flex: 1, minWidth: 0 }}>
           <Text strong style={{ fontSize: 13 }}>
             AI 全能工作站
@@ -112,7 +113,7 @@ export function RecommendCards() {
         onMouseEnter={(e) => (e.currentTarget.style.borderColor = "var(--ant-color-primary)")}
         onMouseLeave={(e) => (e.currentTarget.style.borderColor = "var(--ant-color-border)")}
       >
-        <CodeOutlined style={{ fontSize: 20, color: "var(--ant-color-primary)" }} />
+        <img src={aicoderLogo} alt="" style={{ width: 22, height: 22, objectFit: "contain" }} />
         <div style={{ flex: 1, minWidth: 0 }}>
           <Text strong style={{ fontSize: 13 }}>
             智码 AICoder
@@ -132,7 +133,7 @@ export function RecommendCards() {
         onMouseEnter={(e) => (e.currentTarget.style.borderColor = "var(--ant-color-primary)")}
         onMouseLeave={(e) => (e.currentTarget.style.borderColor = "var(--ant-color-border)")}
       >
-        <KeyOutlined style={{ fontSize: 20, color: "var(--ant-color-primary)" }} />
+        <img src={sigilLogo} alt="" style={{ width: 22, height: 22, objectFit: "contain" }} />
         <div style={{ flex: 1, minWidth: 0 }}>
           <Text strong style={{ fontSize: 13 }}>
             Sigil · AI 凭据金库
@@ -152,7 +153,7 @@ export function RecommendCards() {
         onMouseEnter={(e) => (e.currentTarget.style.borderColor = "var(--ant-color-primary)")}
         onMouseLeave={(e) => (e.currentTarget.style.borderColor = "var(--ant-color-border)")}
       >
-        <CloudServerOutlined style={{ fontSize: 20, color: "var(--ant-color-primary)" }} />
+        <img src={reeveLogo} alt="" style={{ width: 22, height: 22, objectFit: "contain" }} />
         <div style={{ flex: 1, minWidth: 0 }}>
           <Text strong style={{ fontSize: 13 }}>
             Reeve · 服务器庄园总管
@@ -172,7 +173,7 @@ export function RecommendCards() {
         onMouseEnter={(e) => (e.currentTarget.style.borderColor = "var(--ant-color-primary)")}
         onMouseLeave={(e) => (e.currentTarget.style.borderColor = "var(--ant-color-border)")}
       >
-        <CameraOutlined style={{ fontSize: 20, color: "var(--ant-color-primary)" }} />
+        <img src={agileshotLogo} alt="" style={{ width: 22, height: 22, objectFit: "contain" }} />
         <div style={{ flex: 1, minWidth: 0 }}>
           <Text strong style={{ fontSize: 13 }}>
             AgileShot · 截图标注工具
@@ -194,7 +195,7 @@ export function RecommendCards() {
         width={520}
       >
         <div style={{ textAlign: "center", paddingTop: 8, paddingBottom: 12 }}>
-          <RocketOutlined style={{ fontSize: 36, color: "var(--ant-color-primary)" }} />
+          <img src={ruoyiLogo} alt="" style={{ width: 44, height: 44, objectFit: "contain" }} />
           <Title level={4} style={{ margin: "12px 0 4px" }}>
             RuoYi-Plus-UniApp
           </Title>
@@ -285,7 +286,7 @@ export function RecommendCards() {
         width={520}
       >
         <div style={{ textAlign: "center", paddingTop: 8, paddingBottom: 12 }}>
-          <AppstoreOutlined style={{ fontSize: 36, color: "var(--ant-color-primary)" }} />
+          <img src={workstationLogo} alt="" style={{ width: 44, height: 44, objectFit: "contain" }} />
           <Title level={4} style={{ margin: "12px 0 4px" }}>
             AI 全能工作站
           </Title>
@@ -366,7 +367,7 @@ export function RecommendCards() {
         width={520}
       >
         <div style={{ textAlign: "center", paddingTop: 8, paddingBottom: 12 }}>
-          <ThunderboltOutlined style={{ fontSize: 36, color: "var(--ant-color-primary)" }} />
+          <img src={tauriLogo} alt="" style={{ width: 44, height: 44, objectFit: "contain" }} />
           <Title level={4} style={{ margin: "12px 0 4px" }}>
             灵动桌面应用开发框架
           </Title>
@@ -463,7 +464,7 @@ export function RecommendCards() {
         width={520}
       >
         <div style={{ textAlign: "center", paddingTop: 8, paddingBottom: 12 }}>
-          <KeyOutlined style={{ fontSize: 36, color: "var(--ant-color-primary)" }} />
+          <img src={sigilLogo} alt="" style={{ width: 44, height: 44, objectFit: "contain" }} />
           <Title level={4} style={{ margin: "12px 0 4px" }}>
             Sigil · AI 凭据金库
           </Title>
@@ -538,7 +539,7 @@ export function RecommendCards() {
         width={520}
       >
         <div style={{ textAlign: "center", paddingTop: 8, paddingBottom: 12 }}>
-          <CloudServerOutlined style={{ fontSize: 36, color: "var(--ant-color-primary)" }} />
+          <img src={reeveLogo} alt="" style={{ width: 44, height: 44, objectFit: "contain" }} />
           <Title level={4} style={{ margin: "12px 0 4px" }}>
             Reeve · 服务器庄园总管
           </Title>
@@ -613,7 +614,7 @@ export function RecommendCards() {
         width={520}
       >
         <div style={{ textAlign: "center", paddingTop: 8, paddingBottom: 12 }}>
-          <CameraOutlined style={{ fontSize: 36, color: "var(--ant-color-primary)" }} />
+          <img src={agileshotLogo} alt="" style={{ width: 44, height: 44, objectFit: "contain" }} />
           <Title level={4} style={{ margin: "12px 0 4px" }}>
             AgileShot · 截图标注工具
           </Title>
@@ -694,7 +695,7 @@ export function RecommendCards() {
         width={520}
       >
         <div style={{ textAlign: "center", paddingTop: 8, paddingBottom: 12 }}>
-          <CodeOutlined style={{ fontSize: 36, color: "var(--ant-color-primary)" }} />
+          <img src={aicoderLogo} alt="" style={{ width: 44, height: 44, objectFit: "contain" }} />
           <Title level={4} style={{ margin: "12px 0 4px" }}>
             智码 AICoder
           </Title>
