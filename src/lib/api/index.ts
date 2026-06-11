@@ -603,6 +603,11 @@ export const exportApi = {
    *  返回的 HTML 与 exportSingleToHtml 同构：图片已 inline 为 base64，自包含。 */
   renderHtmlForPdf: (id: number) =>
     invoke<string>("render_note_html_for_pdf", { id }),
+  /** R-005b 「所见即所得」打印：把编辑器**实时 DOM** 序列化出的 HTML 里的本地图片/附件
+   *  inline 成 base64。与 renderHtmlForPdf 不同——不经 markdown 重渲、不套模板，只内嵌
+   *  传入 HTML 的本地资源，保证打印 iframe 自包含、所见即所得。返回内嵌后的 HTML 片段。 */
+  inlineNoteHtmlAssets: (html: string) =>
+    invoke<string>("inline_note_html_assets", { html }),
 };
 
 /** 附件 API（PDF/Office/ZIP/音视频等非图片非文本文件）

@@ -20,12 +20,13 @@ import {
   App as AntdApp,
   theme as antdTheme,
 } from "antd";
-import { ArrowLeft, Save, Trash2, Pin, FolderOpen, Tags, Link2, Share, Maximize2, Minimize2, FileText as FileTextIcon, ChevronRight, ChevronDown, CornerUpLeft, Folder as FolderIcon, Eye, EyeOff, Lock, Unlock, MessageSquare, ListTree, Network, ExternalLink, BookOpen, FilePen, Presentation } from "lucide-react";
+import { ArrowLeft, Save, Trash2, Pin, FolderOpen, Tags, Link2, Share, Maximize2, Minimize2, FileText as FileTextIcon, ChevronRight, ChevronDown, CornerUpLeft, Folder as FolderIcon, Eye, EyeOff, Lock, Unlock, MessageSquare, ListTree, Network, ExternalLink, BookOpen, FilePen, Presentation, Printer } from "lucide-react";
 import { CloseCircleFilled } from "@ant-design/icons";
 import { useAppStore } from "@/store";
 import { useTabsStore } from "@/store/tabs";
 import { noteApi, tagApi, folderApi, linkApi, exportApi, sourceFileApi, vaultApi, sourceWritebackApi } from "@/lib/api";
 import { printHtmlAsPdf } from "@/lib/exportPdf";
+import { printEditorContent } from "@/lib/printNote";
 import { VaultModal } from "@/components/vault/VaultModal";
 import { open as openDialog, save } from "@tauri-apps/plugin-dialog";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -1614,6 +1615,25 @@ function DesktopNoteEditorPage() {
     }
   }
 
+  /** R-005b 所见即所得打印：克隆编辑器实时 DOM + 应用同款 CSS → 系统打印对话框。
+   *  与 handleExportPdf 不同——不经 markdown 重渲，打印出来 = 屏幕上看到的排版。
+   *  对话框里可选真实打印机出纸，或「另存为 PDF」。 */
+  async function handlePrint() {
+    if (!editorInstance) {
+      message.warning("编辑器尚未就绪，请稍候再试");
+      return;
+    }
+    const hide = message.loading("正在准备打印…", 0);
+    try {
+      await printEditorContent(editorInstance, title);
+      hide();
+      message.info("请在打印对话框中选择打印机，或「另存为 PDF」", 3);
+    } catch (e) {
+      hide();
+      message.error(`打印失败: ${e}`);
+    }
+  }
+
   async function handleTagsChange(newTagIds: number[]) {
     const currentIds = noteTags.map((t) => t.id);
     const toAdd = newTagIds.filter((id) => !currentIds.includes(id));
@@ -1941,6 +1961,10 @@ function DesktopNoteEditorPage() {
               </Tooltip>
             )
           )}
+          {/* R-005b 打印：所见即所得，克隆编辑器实时 DOM + 应用同款 CSS → 系统打印对话框 */}
+          <Tooltip title="打印 / 打印成 PDF（所见即所得）">
+            <Button icon={<Printer size={16} />} onClick={() => void handlePrint()} />
+          </Tooltip>
           {/* T-020 导出按钮：默认导出 Markdown；右侧下拉可选 Word / HTML（Ctrl+Shift+E 唤起菜单） */}
           {(() => {
             const exportAccel = accelToKeys(
@@ -1976,8 +2000,13 @@ function DesktopNoteEditorPage() {
                         onClick: () => void handleExportHtml(),
                       },
                       {
+                        key: "print",
+                        label: "打印 / 打印成 PDF（所见即所得）",
+                        onClick: () => void handlePrint(),
+                      },
+                      {
                         key: "pdf",
-                        label: "导出为 PDF (打印)",
+                        label: "导出为 PDF (旧版排版)",
                         onClick: () => void handleExportPdf(),
                       },
                     ],

@@ -154,3 +154,21 @@ pub fn render_note_html_for_pdf(
 
     Ok(html)
 }
+
+/// R-005b 「所见即所得」打印支撑：把前端传来的**编辑器实时 DOM** HTML 里的本地图片 /
+/// 附件链接 inline 成 base64。
+///
+/// 与 `render_note_html_for_pdf` 的区别：那条从 markdown 经 pulldown-cmark **重新渲染**，
+/// 套的是另一套极简 CSS 模板，导出后样式跟编辑器里看到的不一样；本条不碰结构 / 样式，
+/// 直接接收编辑器**已渲染**的真实 DOM HTML，只做资源内嵌，让前端「打印 = 屏幕所见」。
+/// 前端负责克隆 DOM、注入应用同一份 CSS、触发系统打印对话框。
+#[tauri::command]
+pub fn inline_note_html_assets(
+    state: tauri::State<'_, AppState>,
+    html: String,
+) -> Result<String, String> {
+    let assets_root = state.data_dir.clone();
+    let (html, _img, _att) =
+        services::export_html::HtmlExportService::inline_assets(&html, &assets_root);
+    Ok(html)
+}

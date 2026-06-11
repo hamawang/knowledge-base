@@ -76,6 +76,22 @@ impl HtmlExportService {
             attachments_missing: att_missing,
         })
     }
+
+    /// R-005b 把任意 HTML 片段里的本地图片 / 附件链接 inline 成 base64（自包含）。
+    ///
+    /// 与 `render_html` / `export_single` 的本质区别：**不经 markdown 渲染、不套 CSS 模板**，
+    /// 只对传入的 HTML 原样做资源内嵌。用于「打印编辑器实时 DOM」场景：前端把编辑器
+    /// 已渲染好的真实 DOM（callout / 分栏 / figure / mermaid SVG 等）序列化成 HTML 传进来，
+    /// 本方法复用导出管线同款 `inline_images` + `inline_attachments`，把 `kb-asset://` 等
+    /// 本地资源换成 data: URL —— 确保打印 iframe 不依赖自定义协议 / CSP / 加载时序，
+    /// 资源同步可用，打印 = 所见即所得。
+    ///
+    /// 返回 `(html, images_inlined, attachments_inlined)`。
+    pub fn inline_assets(html: &str, assets_root: &Path) -> (String, usize, usize) {
+        let (html, img_inlined, _img_missing) = inline_images(html, assets_root);
+        let (html, att_inlined, _att_missing) = inline_attachments(&html, assets_root);
+        (html, img_inlined, att_inlined)
+    }
 }
 
 /// 用一个最简模板包住 body：
