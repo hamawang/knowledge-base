@@ -93,6 +93,18 @@ pub enum VaultStatus {
     Unlocked,
 }
 
+/// 应用启动锁状态（软锁 / UX 门禁，不是数据加密）
+///
+/// 与 Vault / HiddenPin 完全独立：这是"打开软件就要输密码"的全局门禁。
+/// - `enabled`：是否已设置进入密码（= 锁是否开启）
+/// - `auto_lock_minutes`：闲置自动锁定分钟数；0 = 关闭自动锁定
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppLockStatus {
+    pub enabled: bool,
+    pub auto_lock_minutes: i64,
+}
+
 /// 创建/更新笔记的入参
 #[derive(Debug, Clone, Deserialize)]
 pub struct NoteInput {

@@ -895,6 +895,13 @@ pub fn run() {
             commands::hidden_pin::verify_hidden_pin,
             commands::hidden_pin::clear_hidden_pin,
             commands::hidden_pin::get_hidden_pin_hint,
+            // 应用启动锁（软锁 / 全局进入密码，非真加密）
+            commands::app_lock::app_lock_status,
+            commands::app_lock::app_lock_set_password,
+            commands::app_lock::app_lock_verify,
+            commands::app_lock::app_lock_disable,
+            commands::app_lock::app_lock_get_hint,
+            commands::app_lock::app_lock_set_auto_minutes,
             // T-014 网页剪藏
             commands::notes::clip_url_to_note,
             // 多窗口 pop-out（笔记对照 / 双显示器分屏）
