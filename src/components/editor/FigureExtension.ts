@@ -1,22 +1,37 @@
 import ImageResize from "tiptap-extension-resize-image";
+import { ReactNodeViewRenderer } from "@tiptap/react";
+import { ImageResizeNodeView } from "./ImageResizeNodeView";
 
 /**
- * 图片节点扩展：在 ImageResize 之上叠加 `caption`（图注）和 `alt`（替代文本）
+ * 图片节点扩展：在 ImageResize 之上叠加 `caption`（图注）、`alt`（替代文本）、
+ * `align`（左/中/右对齐），并用自绘的 React NodeView 替换第三方包原生 NodeView。
  *
  * 设计原则：
- *   1. **不动 ImageResize 的 NodeView**——保留原拖拽缩放手柄，避免重写 200+ 行
- *      原生 NodeView。caption/alt 编辑入口由外部（EditorToolbar 的 "图注" 按钮 +
- *      Modal）提供，比侵入 NodeView 风险低得多。
- *   2. **存储兼容**：无 caption 的图片走标准 markdown `![alt](url)`；只有当 caption
- *      非空时才落 raw HTML `<figure><img.../><figcaption>...</figcaption></figure>`。
- *      这样旧笔记不破坏，导出成 .md 也兼容（CommonMark 允许 raw HTML，主流 markdown
- *      渲染器能识别 figure）。
- *   3. **解析回填**：粘贴含 `<figure>` 的 HTML 或加载历史 figure 笔记时，能把
- *      caption / alt 还原到 attrs。
+ *   1. **自绘 NodeView**（见 ImageResizeNodeView.tsx 注释）——第三方包的原生 NodeView
+ *      靠 DOM click + document 全局监听显示手柄，且不实现 destroy 等生命周期，在「复用
+ *      编辑器 + setContent 切笔记」架构下监听泄漏 + 选中失效。这里 override addNodeView
+ *      改用 ReactNodeViewRenderer，选中态由 ProseMirror NodeSelection 驱动。
+ *      仍借用 ImageResize 的 name(`imageResize`) / parseHTML(img) / 基础 attrs。
+ *   2. **存储兼容**：无 caption / 无尺寸 / 无对齐的图片走标准 markdown `![alt](url)`；
+ *      一旦带 caption、自定义尺寸或对齐，就退成 raw HTML 兜底（`<img ...>` 或
+ *      `<figure>...</figure>`），否则这些信息会在下次打开笔记时丢失。CommonMark 允许
+ *      raw HTML，导出 .md 也兼容。
+ *   3. **解析回填**：粘贴含 `<figure>` 的 HTML 或加载历史 figure 笔记时，把
+ *      caption / alt / align 还原到 attrs。
  *
  * 与"表格自定义列宽 → HTML 兜底"采用同一思路（见 TiptapEditor.tsx 的
  * TableWithMarkdown）。
  */
+
+type ImgAlign = "left" | "center" | "right";
+
+/** 对齐 → 兜底 raw HTML 用的 inline style（让导出的 .md 在外部渲染器也能对齐） */
+function alignToStyle(align: ImgAlign): string {
+  if (align === "center") return "display:block;margin-left:auto;margin-right:auto;";
+  if (align === "right") return "display:block;margin-left:auto;";
+  return "";
+}
+
 export const FigureImage = ImageResize.extend({
   addAttributes() {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -32,20 +47,34 @@ export const FigureImage = ImageResize.extend({
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         renderHTML: (attrs: any) => (attrs.alt ? { alt: attrs.alt } : {}),
       },
-      caption: {
+      // 显式声明 width/height，确保拖拽缩放后 updateAttributes({width}) 能落进 schema，
+      // 进而被下方 markdown serialize 读到并兜底成 raw HTML（否则尺寸打开就丢）。
+      width: {
         default: null,
-        // 从 figure 的 figcaption 文本读出（parseHTML 钩子在 figure 那条规则里）；
-        // 也接受 img 上的 data-caption / title 兜底（某些 paste 路径会先经过 img 规则）
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        parseHTML: (el: any) =>
-          el.getAttribute("data-caption") || el.getAttribute("title") || null,
-        // 同时输出 title，让编辑器 live view 鼠标 hover 也能看到图注；data-caption
-        // 是给搜索/调试看的稳定 attr。
+        parseHTML: (el: any) => el.getAttribute("width") || null,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        renderHTML: (attrs: any) =>
-          attrs.caption
-            ? { "data-caption": attrs.caption, title: attrs.caption }
-            : {},
+        renderHTML: (attrs: any) => (attrs.width ? { width: attrs.width } : {}),
+      },
+      height: {
+        default: null,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        parseHTML: (el: any) => el.getAttribute("height") || null,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        renderHTML: (attrs: any) => (attrs.height ? { height: attrs.height } : {}),
+      },
+      // 对齐：left(默认)/center/right。用 data-align 持久化（自己解析稳定），
+      // 同时输出 inline style 让导出 .md 在外部 markdown 渲染器也能对齐。
+      align: {
+        default: null,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        parseHTML: (el: any) => el.getAttribute("data-align") || null,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        renderHTML: (attrs: any) => {
+          const align = attrs.align as ImgAlign | null;
+          if (!align || align === "left") return {};
+          return { "data-align": align, style: alignToStyle(align) };
+        },
       },
     };
   },
@@ -64,11 +93,18 @@ export const FigureImage = ImageResize.extend({
           const img = el.querySelector("img");
           if (!img) return false; // 不是 figure(img) 就不匹配
           const figcap = el.querySelector("figcaption");
+          // 对齐优先读 figure 的 data-align（serialize 把 figure 对齐放在这里），
+          // 兜底读内部 img 的 data-align
+          const align =
+            el.getAttribute("data-align") ||
+            img.getAttribute("data-align") ||
+            null;
           return {
             src: img.getAttribute("src"),
             alt: img.getAttribute("alt") || null,
             width: img.getAttribute("width") || null,
             height: img.getAttribute("height") || null,
+            align,
             caption: figcap?.textContent?.trim() || null,
           };
         },
@@ -78,7 +114,7 @@ export const FigureImage = ImageResize.extend({
   },
 
   renderHTML({ HTMLAttributes }) {
-    // 有 caption → 包成 figure；没有 → 走原 img 渲染（让 ImageResize 的 NodeView 接管）
+    // 有 caption → 包成 figure；没有 → 走原 img 渲染
     const caption = HTMLAttributes.caption;
     if (caption) {
       const { caption: _drop, ...imgAttrs } = HTMLAttributes;
@@ -101,6 +137,11 @@ export const FigureImage = ImageResize.extend({
     return ["img", HTMLAttributes];
   },
 
+  // 用自绘 React NodeView 替换第三方包原生 NodeView（修选中失效 + 监听泄漏，见文件头注释）
+  addNodeView() {
+    return ReactNodeViewRenderer(ImageResizeNodeView);
+  },
+
   // tiptap-markdown 的 storage 注入：override 默认的 image markdown 序列化
   addStorage() {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -113,18 +154,19 @@ export const FigureImage = ImageResize.extend({
       markdown: {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         serialize(state: any, node: any) {
-          const { src, alt, caption, width, height } = node.attrs;
+          const { src, alt, caption, width, height, align } = node.attrs;
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const editor = (this as any).editor;
           const htmlAllowed = editor?.storage?.markdown?.options?.html;
 
-          // 普通 markdown ![alt](url) 无法表达 width/height，所以只要存在 caption
-          // 或自定义尺寸（用户拖拽 ImageResize 调整过），都退成 raw HTML 兜底；
-          // 否则尺寸 / 图注会在下次打开笔记时丢失。
+          // 普通 markdown ![alt](url) 无法表达 width/height/对齐，所以只要存在 caption、
+          // 自定义尺寸（拖拽调整过）或非左对齐，都退成 raw HTML 兜底；否则尺寸 / 图注 /
+          // 对齐会在下次打开笔记时丢失。
           const hasSize =
             (width !== undefined && width !== null && width !== "") ||
             (height !== undefined && height !== null && height !== "");
-          const needHtml = (caption || hasSize) && htmlAllowed;
+          const hasAlign = align === "center" || align === "right";
+          const needHtml = (caption || hasSize || hasAlign) && htmlAllowed;
 
           if (needHtml) {
             const esc = (v: unknown) =>
@@ -140,16 +182,23 @@ export const FigureImage = ImageResize.extend({
               (height != null && height !== ""
                 ? ` height="${esc(height)}"`
                 : "");
+            const alignAttr = hasAlign ? ` data-align="${align}"` : "";
+            const alignStyle = hasAlign
+              ? ` style="${alignToStyle(align as ImgAlign)}"`
+              : "";
 
             if (caption) {
               const safeCap = String(caption)
                 .replace(/&/g, "&amp;")
                 .replace(/</g, "&lt;");
+              // 对齐放在 figure 上（与 parseHTML 的 figure 规则一致）
               state.write(
-                `<figure>\n<img src="${safeSrc}" alt="${safeAlt}"${sizeAttr}>\n<figcaption>${safeCap}</figcaption>\n</figure>`,
+                `<figure${alignAttr}${alignStyle}>\n<img src="${safeSrc}" alt="${safeAlt}"${sizeAttr}>\n<figcaption>${safeCap}</figcaption>\n</figure>`,
               );
             } else {
-              state.write(`<img src="${safeSrc}" alt="${safeAlt}"${sizeAttr}>`);
+              state.write(
+                `<img src="${safeSrc}" alt="${safeAlt}"${sizeAttr}${alignAttr}${alignStyle}>`,
+              );
             }
             state.closeBlock(node);
             return;

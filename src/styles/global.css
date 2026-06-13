@@ -1229,6 +1229,28 @@ body,
   height: auto;
 }
 
+/* ── 自绘图片 NodeView（ImageResizeNodeView）─────────────────────
+   选中态的 4 角缩放手柄 / 对齐·1:1 工具条由 React 组件内联绝对定位渲染，
+   这里只管基础排版：外层 block 控制上下间距 + 对齐(flex 的 justifyContent)，
+   frame 收紧到图片宽度且永不溢出窄列/内容区。 */
+.kb-image-block {
+  margin: 0.5em 0;
+}
+.kb-image-frame {
+  max-width: 100%;
+}
+.tiptap .kb-image-frame > img.kb-image-img,
+.ProseMirror .kb-image-frame > img.kb-image-img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  /* 间距交给 .kb-image-block 统一控制，覆盖 .tiptap img 的默认上下 margin */
+  margin: 0;
+  border-radius: 6px;
+  /* 双击放大（ImageLightbox）；拖拽缩放手柄有各自的方向 cursor */
+  cursor: zoom-in;
+}
+
 /* 图片 resize 暗色 — 见 themes.css */
 
 /* 表格 */

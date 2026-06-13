@@ -11,6 +11,8 @@ import {
   MessageSquare,
   Image as ImageIcon,
   Layers,
+  Maximize2,
+  Minimize2,
 } from "lucide-react";
 import { revealItemInDir, openPath } from "@tauri-apps/plugin-opener";
 import { useContextMenu } from "@/hooks/useContextMenu";
@@ -135,6 +137,29 @@ export function useEditorContextMenu(
         editor.chain().focus().setNodeSelection(pos).deleteSelection().run();
       } catch (e) {
         message.error(`删除失败：${e}`);
+      }
+    },
+    [editor],
+  );
+
+  /** 改图片节点属性（1:1 / 适应页宽）：定位 DOM → 选中节点 → updateAttributes */
+  const updateImageAtElement = useCallback(
+    (el: HTMLElement, attrs: Record<string, unknown>) => {
+      if (!editor) return;
+      try {
+        const pos = editor.view.posAtDOM(el, 0);
+        if (pos < 0) {
+          message.error("无法定位图片");
+          return;
+        }
+        editor
+          .chain()
+          .focus()
+          .setNodeSelection(pos)
+          .updateAttributes("imageResize", attrs)
+          .run();
+      } catch (e) {
+        message.error(`操作失败：${e}`);
       }
     },
     [editor],
@@ -435,6 +460,37 @@ export function useEditorContextMenu(
     if (p.kind === "image") {
       return [
         {
+          key: "actual-size",
+          label: "原始比例 (1:1)",
+          icon: <Maximize2 size={13} />,
+          onClick: () => {
+            ctx.close();
+            const img = (
+              p.el.tagName === "IMG" ? p.el : p.el.querySelector("img")
+            ) as HTMLImageElement | null;
+            const nat = img?.naturalWidth ?? 0;
+            if (nat > 0) {
+              // 受 1200 上限钳制（与 FigureImage.configure 的 maxWidth 一致）
+              updateImageAtElement(p.el, {
+                width: String(Math.min(nat, 1200)),
+                height: null,
+              });
+            } else {
+              message.warning("图片尚未加载完成，请稍后再试");
+            }
+          },
+        },
+        {
+          key: "fit-width",
+          label: "适应页宽",
+          icon: <Minimize2 size={13} />,
+          onClick: () => {
+            ctx.close();
+            updateImageAtElement(p.el, { width: null, height: null });
+          },
+        },
+        { type: "divider" },
+        {
           key: "copy-image",
           label: "复制图片",
           icon: <ImageIcon size={13} />,
@@ -641,7 +697,15 @@ export function useEditorContextMenu(
         },
       },
     ];
-  }, [ctx, navigate, deleteNodeAtElement, editor, noteId, cardsEnabled]);
+  }, [
+    ctx,
+    navigate,
+    deleteNodeAtElement,
+    updateImageAtElement,
+    editor,
+    noteId,
+    cardsEnabled,
+  ]);
 
   return { ctx, menuItems };
 }
