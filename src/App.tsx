@@ -9,6 +9,7 @@ import { AppRouter } from "@/Router";
 import { getAntdTokens } from "@/theme/tokens";
 import { TaskReminderListener } from "@/components/tasks/TaskReminderListener";
 import { UpdaterProvider } from "@/components/updater/UpdaterProvider";
+import { AppLockGate } from "@/components/applock/AppLockGate";
 
 // 紧急提醒窗口 / 迁移 splash 等子窗口共用同一个 React bundle，
 // 但只有 main 窗口才需要挂全局提醒监听器，否则子窗口也会响应 task:reminder
@@ -127,7 +128,14 @@ function App() {
       <AntdApp style={{ height: "100%" }}>
         <ErrorBoundary>
           <UpdaterProvider enabled={IS_MAIN_WINDOW}>
-            <AppRouter />
+            {/* 应用启动锁仅作用于主窗口：子窗口（quick-add/紧急提醒/pop-out）从已解锁会话派生，不再拦截 */}
+            {IS_MAIN_WINDOW ? (
+              <AppLockGate>
+                <AppRouter />
+              </AppLockGate>
+            ) : (
+              <AppRouter />
+            )}
           </UpdaterProvider>
           {IS_MAIN_WINDOW && <TaskReminderListener />}
         </ErrorBoundary>

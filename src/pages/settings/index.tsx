@@ -57,6 +57,7 @@ import { DataDirSection } from "@/components/settings/DataDirSection";
 import { FeatureModulesSection } from "@/components/settings/FeatureModulesSection";
 import OrphanAssetsPanel from "@/components/settings/OrphanAssetsPanel";
 import { HiddenPinSection } from "@/components/hidden/HiddenPinSection";
+import { AppLockSection } from "@/components/applock/AppLockSection";
 import { ShortcutsSection } from "@/components/settings/ShortcutsSection";
 import { EditorHighlightShortcutRow } from "@/components/settings/EditorHighlightShortcutRow";
 import { MCPServerSection } from "@/components/settings/MCPServerSection";
@@ -1300,6 +1301,8 @@ function DesktopSettingsPage() {
       </Card>
 
       <FeatureModulesSection />
+
+      <AppLockSection />
 
       <div id="settings-hidden-pin">
         <HiddenPinSection />

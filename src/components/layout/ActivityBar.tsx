@@ -18,6 +18,7 @@ import {
   Trash2,
   Info,
   EyeOff,
+  Lock,
 } from "lucide-react";
 import { useAppStore } from "@/store";
 import type { ActiveView } from "@/store";
@@ -128,6 +129,8 @@ export function ActivityBar() {
   const refreshTaskStats = useAppStore((s) => s.refreshTaskStats);
   const isHiddenUnlocked = useAppStore((s) => s.isHiddenUnlocked);
   const enabledViews = useAppStore((s) => s.enabledViews);
+  const appLockEnabled = useAppStore((s) => s.appLockEnabled);
+  const lockAppNow = useAppStore((s) => s.lockAppNow);
   const [unlockOpen, setUnlockOpen] = useState(false);
 
   /** 是否显示某项：核心永远显示；可选项看用户是否在设置里启用 */
@@ -303,6 +306,46 @@ export function ActivityBar() {
     >
       {MAIN_GROUPS.flat().filter(isVisible).map(renderItem)}
       <div style={{ flex: 1 }} />
+      {/* 立即锁定：仅在已启用应用锁时显示，点一下回到锁屏（临时离开座位用） */}
+      {appLockEnabled && (
+        <Tooltip title="立即锁定" placement="right" mouseEnterDelay={0.15}>
+          <button
+            type="button"
+            onClick={lockAppNow}
+            aria-label="立即锁定"
+            className="activity-item"
+            style={{
+              width: 56,
+              height: 52,
+              borderRadius: 8,
+              border: "none",
+              cursor: "pointer",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 5,
+              padding: "4px 2px",
+              background: "transparent",
+              color: token.colorTextSecondary,
+            }}
+          >
+            <Lock size={20} color={token.colorTextSecondary} />
+            <span
+              style={{
+                fontSize: 12,
+                lineHeight: 1.1,
+                maxWidth: "100%",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              锁定
+            </span>
+          </button>
+        </Tooltip>
+      )}
       {BOTTOM_ITEMS.filter(isVisible).map(renderItem)}
       <HiddenPinUnlockModal
         open={unlockOpen}
