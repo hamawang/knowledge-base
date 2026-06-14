@@ -46,7 +46,7 @@ import { configApi, syncApi, syncV1Api } from "@/lib/api";
 import { ShareConfigModal } from "@/components/config-share/ShareConfigModal";
 import { ImportConfigModal } from "@/components/config-share/ImportConfigModal";
 import { ConflictResolveModal } from "@/components/settings/ConflictResolveModal";
-import { exportWebDavBackend, type Envelope } from "@/lib/configShare";
+import { exportSyncBackend, type Envelope } from "@/lib/configShare";
 import type {
   SyncBackend,
   SyncBackendInput,
@@ -682,16 +682,14 @@ export function SyncV1Section() {
                       后台同步
                     </Button>
                   </Tooltip>
-                  {b.kind === "webdav" && (
-                    <Tooltip title="分享到其他设备（含加密）">
-                      <Button
-                        size="small"
-                        icon={<Share2 size={13} />}
-                        disabled={busy}
-                        onClick={() => setShareEnv(exportWebDavBackend(b))}
-                      />
-                    </Tooltip>
-                  )}
+                  <Tooltip title="分享到其他设备（含密码 / 密钥，可加密）">
+                    <Button
+                      size="small"
+                      icon={<Share2 size={13} />}
+                      disabled={busy}
+                      onClick={() => setShareEnv(exportSyncBackend(b))}
+                    />
+                  </Tooltip>
                   <Tooltip title="编辑">
                     <Button
                       size="small"

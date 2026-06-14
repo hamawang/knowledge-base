@@ -164,8 +164,8 @@ export function ImportConfigModal({
     try {
       const summary = await applyEnvelope(parsed);
       const lines: string[] = [];
-      if (summary.webdavBackends > 0)
-        lines.push(`✓ WebDAV 后端 ${summary.webdavBackends} 个`);
+      if (summary.syncBackends > 0)
+        lines.push(`✓ 同步源 ${summary.syncBackends} 个`);
       if (summary.aiModels > 0)
         lines.push(`✓ AI 模型 ${summary.aiModels} 个`);
       if (summary.asrConfig) lines.push("✓ 语音识别配置");
@@ -289,6 +289,12 @@ export function ImportConfigModal({
           description={
             parsed.kind === "webdav-backend"
               ? `名称：${parsed.data.name} · URL：${parsed.data.config.url}`
+              : parsed.kind === "sync-backend"
+                ? `名称：${parsed.data.name} · 类型：${
+                    { local: "本地路径", webdav: "WebDAV", s3: "S3 兼容" }[
+                      parsed.data.kind
+                    ]
+                  }`
               : parsed.kind === "ai-model"
                 ? `名称：${parsed.data.name} · ${parsed.data.provider} · ${parsed.data.model_id}`
                 : parsed.kind === "asr-config"

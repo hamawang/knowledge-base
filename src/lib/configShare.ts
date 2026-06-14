@@ -22,6 +22,7 @@ import { encryptWithPin, decryptWithPin } from "@/lib/configCrypto";
 import type {
   SyncBackend,
   SyncBackendInput,
+  SyncBackendKind,
   AiModel,
   AiModelInput,
   WebDavConfig,
@@ -58,7 +59,8 @@ export interface EncryptedEnvelope {
 
 /** 配置类型：每种 kind 对应一组 data */
 export type ConfigKind =
-  | "webdav-backend"  // SyncBackend (kind=webdav) — 含密码
+  | "webdav-backend"  // SyncBackend (kind=webdav) — 含密码（旧格式，仅导入端兼容）
+  | "sync-backend"     // SyncBackend（任意 kind: local/webdav/s3）— 通用同步源
   | "ai-model"         // AiModelInput — 含 api_key
   | "asr-config"       // AsrConfig — 语音识别（含 apiKey）
   | "feature-toggles"  // 功能开关 + Dashboard 显示项 + Tab 顺序
@@ -77,6 +79,19 @@ export interface WebDavBackendData {
   name: string;
   /** 直接是 SyncBackend.configJson 解析后的对象（含 password） */
   config: WebDavConfig;
+}
+
+/**
+ * 通用同步源数据：覆盖 local / webdav / s3 全部类型。
+ * config 直接是 SyncBackend.configJson 解析后的对象，
+ * 各类型字段不同（local: path / webdav: url+username+password /
+ * s3: endpoint+bucket+accessKey+secretKey...），含敏感字段。
+ */
+export interface SyncBackendData {
+  /** 同步源类型：local（本地路径/同步盘）/ webdav / s3 */
+  kind: SyncBackendKind;
+  name: string;
+  config: Record<string, unknown>;
 }
 
 export interface AiModelData {
@@ -104,6 +119,7 @@ export interface BundleData {
 
 export type Envelope =
   | EnvelopeBase<"webdav-backend", WebDavBackendData>
+  | EnvelopeBase<"sync-backend", SyncBackendData>
   | EnvelopeBase<"ai-model", AiModelData>
   | EnvelopeBase<"asr-config", AsrConfig>
   | EnvelopeBase<"feature-toggles", FeatureTogglesData>
@@ -122,7 +138,10 @@ function envelope<K extends ConfigKind, D>(kind: K, data: D): EnvelopeBase<K, D>
   };
 }
 
-/** 把后端返回的 SyncBackend 序列化成 webdav-backend envelope */
+/**
+ * 把后端返回的 SyncBackend 序列化成 webdav-backend envelope（仅 WebDAV）。
+ * 移动端（只支持 WebDAV）仍用此函数；桌面端含 local/s3 的场景请用 exportSyncBackend。
+ */
 export function exportWebDavBackend(b: SyncBackend): Envelope {
   let cfg: WebDavConfig = { url: "", username: "" };
   try {
@@ -133,6 +152,26 @@ export function exportWebDavBackend(b: SyncBackend): Envelope {
   return envelope("webdav-backend", {
     name: b.name,
     config: cfg,
+  });
+}
+
+/**
+ * 通用同步源导出：覆盖 local / webdav / s3 三种类型。
+ * config 直接取 configJson 解析后的对象，原样带上各类型的敏感字段
+ * （webdav 的 password、s3 的 secretKey、local 的 path），
+ * 由 ShareConfigModal 顶部的 PIN 加密兜底，避免明文外泄。
+ */
+export function exportSyncBackend(b: SyncBackend): Envelope {
+  let config: Record<string, unknown> = {};
+  try {
+    config = JSON.parse(b.configJson) as Record<string, unknown>;
+  } catch {
+    // 静默失败：config 为空对象（对方导入后可在编辑里补全）
+  }
+  return envelope("sync-backend", {
+    kind: b.kind,
+    name: b.name,
+    config,
   });
 }
 
@@ -313,6 +352,7 @@ function parseInner(text: string): ParseResult {
   const kind = o.kind;
   if (
     kind !== "webdav-backend" &&
+    kind !== "sync-backend" &&
     kind !== "ai-model" &&
     kind !== "asr-config" &&
     kind !== "feature-toggles" &&
@@ -369,7 +409,8 @@ export async function parseEnvelope(
 // ──────────────────────────────────────────────────────────
 
 export interface ImportSummary {
-  webdavBackends: number;
+  /** 成功导入的同步源数量（webdav-backend 旧格式 + sync-backend 新格式合并计数） */
+  syncBackends: number;
   aiModels: number;
   asrConfig: boolean;
   featureToggles: boolean;
@@ -379,7 +420,7 @@ export interface ImportSummary {
 /** 把 envelope 真正写到后端。返回成功统计 + 失败原因列表 */
 export async function applyEnvelope(env: Envelope): Promise<ImportSummary> {
   const summary: ImportSummary = {
-    webdavBackends: 0,
+    syncBackends: 0,
     aiModels: 0,
     asrConfig: false,
     featureToggles: false,
@@ -395,9 +436,23 @@ export async function applyEnvelope(env: Envelope): Promise<ImportSummary> {
           configJson: JSON.stringify(env.data.config),
         };
         await syncV1Api.createBackend(input);
-        summary.webdavBackends = 1;
+        summary.syncBackends = 1;
       } catch (e) {
         summary.errors.push(`WebDAV 后端创建失败：${e}`);
+      }
+      break;
+
+    case "sync-backend":
+      try {
+        const input: SyncBackendInput = {
+          kind: env.data.kind,
+          name: env.data.name,
+          configJson: JSON.stringify(env.data.config),
+        };
+        await syncV1Api.createBackend(input);
+        summary.syncBackends = 1;
+      } catch (e) {
+        summary.errors.push(`同步源创建失败：${e}`);
       }
       break;
 
@@ -463,7 +518,7 @@ export async function applyEnvelope(env: Envelope): Promise<ImportSummary> {
             exportedAt: new Date().toISOString(),
             data: b,
           });
-          summary.webdavBackends += sub.webdavBackends;
+          summary.syncBackends += sub.syncBackends;
           summary.errors.push(...sub.errors);
         }
       }
@@ -508,6 +563,7 @@ export async function applyEnvelope(env: Envelope): Promise<ImportSummary> {
 /** envelope kind → 给用户看的中文标签 */
 export const KIND_LABELS: Record<ConfigKind, string> = {
   "webdav-backend": "WebDAV 同步",
+  "sync-backend": "同步源",
   "ai-model": "AI 模型",
   "asr-config": "语音识别（ASR）",
   "feature-toggles": "功能开关",
